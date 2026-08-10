@@ -27,15 +27,19 @@ jobs:
       # away when those become git or registry pins at M1.
       #
       # clean-manager is private, and the default GITHUB_TOKEN is scoped to
-      # this repository only — so this needs a PAT with read access to it,
-      # stored as the CLEAN_MANAGER_TOKEN secret. Without it, checkout fails
-      # with "repository not found" rather than a permissions message.
+      # this repository only. Both repos are user-owned, so GitHub's
+      # Actions access-sharing (which is org-only) cannot grant it either.
+      #
+      # This uses an SSH deploy key rather than a PAT: a deploy key is bound
+      # to exactly one repository and is registered read-only, so a leak
+      # exposes read access to clean-manager and nothing else. A PAT would
+      # carry the whole account's scopes into this repo's secrets.
       - name: check out clean-manager
         uses: actions/checkout@v4
         with:
           repository: Ivan-Pasco/clean-manager
           path: clean-manager
-          token: ${{ secrets.CLEAN_MANAGER_TOKEN }}
+          ssh-key: ${{ secrets.CLEAN_MANAGER_DEPLOY_KEY }}
 
       - name: install rust toolchain
         uses: dtolnay/rust-toolchain@stable

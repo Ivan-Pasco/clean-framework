@@ -43,9 +43,12 @@ checks out the sibling repo to match; that step disappears with the pin.
 
 > **CI setup:** `clean-manager` is a private repo, and a workflow's default
 > `GITHUB_TOKEN` can only read the repository it runs in. Both workflows
-> therefore check it out with a `CLEAN_MANAGER_TOKEN` secret — a PAT with read
-> access to `Ivan-Pasco/clean-manager`. Without that secret, CI fails at the
-> checkout step with a misleading "repository not found".
+> therefore check it out with a read-only **SSH deploy key**, stored here as
+> the `CLEAN_MANAGER_DEPLOY_KEY` secret and registered on `clean-manager`.
+> A deploy key is used rather than a PAT because it is bound to that one
+> repository and is read-only, so a leak exposes nothing else. Without the
+> secret, CI fails at the checkout step with `Input required and not
+> supplied`. This whole arrangement disappears at M1 with the git pin.
 
 ```sh
 cargo build --workspace

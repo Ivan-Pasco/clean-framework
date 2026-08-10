@@ -47,13 +47,14 @@ jobs:
 
       # See ci.yml — the path dependency on cln-shared / cln-layout needs the
       # sibling checkout until those become git pins at M1. clean-manager is
-      # private, so this needs the CLEAN_MANAGER_TOKEN PAT, not GITHUB_TOKEN.
+      # private, so this uses a read-only SSH deploy key scoped to that one
+      # repository, not a PAT.
       - name: check out clean-manager
         uses: actions/checkout@v4
         with:
           repository: Ivan-Pasco/clean-manager
           path: clean-manager
-          token: ${{ secrets.CLEAN_MANAGER_TOKEN }}
+          ssh-key: ${{ secrets.CLEAN_MANAGER_DEPLOY_KEY }}
 
       - name: install rust toolchain
         uses: dtolnay/rust-toolchain@stable
