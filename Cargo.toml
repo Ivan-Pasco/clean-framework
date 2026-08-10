@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/framework-core",
+    "crates/framework-compiler-driver",
+    "crates/framework-cli",
+    "testing/fake-compiler",
+]
+
+[workspace.package]
+version = "0.1.1"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Ivan-Pasco/clean-framework"
+
+[workspace.dependencies]
+framework-core = { path = "crates/framework-core" }
+framework-compiler-driver = { path = "crates/framework-compiler-driver" }
+
+# Published by clean-manager. Path deps while both repos are pre-1.0 and
+# developed side by side; these become git pins at M1 when manager stabilizes.
+cln-shared = { path = "../clean-manager/crates/cln-shared" }
+cln-layout = { path = "../clean-manager/crates/cln-layout" }
+
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+semver = { version = "1", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+sha2 = "0.10"
+tar = "0.4"
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

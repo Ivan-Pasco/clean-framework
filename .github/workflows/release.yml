@@ -1,0 +1,145 @@
+name: release
+
+# Triggered by pushing a `v*` tag from comita.
+# Publishes one archive per platform plus a `.sha256` sidecar per archive,
+# matching the filename convention cln-install::channels parses:
+#   clean-framework-<version>-<os>-<arch>.<ext>[.sha256]
+#
+# Manager installs these into ~/.cln/versions/framework/<version>/ and expects
+# the binary inside to be named `clean-framework` (cln-shared's
+# ToolchainKind::binary_name).
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            os: macos
+            arch: arm64
+            target: aarch64-apple-darwin
+            ext: tar.gz
+          - runner: ubuntu-latest
+            os: linux
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+            ext: tar.gz
+          - runner: windows-latest
+            os: windows
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
+            ext: zip
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: clean-framework
+
+      # See ci.yml — the path dependency on cln-shared / cln-layout needs the
+      # sibling checkout until those become git pins at M1. clean-manager is
+      # private, so this needs the CLEAN_MANAGER_TOKEN PAT, not GITHUB_TOKEN.
+      - name: check out clean-manager
+        uses: actions/checkout@v4
+        with:
+          repository: Ivan-Pasco/clean-manager
+          path: clean-manager
+          token: ${{ secrets.CLEAN_MANAGER_TOKEN }}
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clean-framework
+          key: ${{ matrix.target }}
+
+      - name: build clean-framework
+        working-directory: clean-framework
+        run: cargo build --release --locked --target ${{ matrix.target }} -p framework-cli
+
+      - name: derive version
+        id: version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "asset_base=clean-framework-${tag#v}-${{ matrix.os }}-${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
+
+      - name: stage archive contents
+        working-directory: clean-framework
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir stage
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            cp "target/${{ matrix.target }}/release/clean-framework.exe" stage/
+          else
+            cp "target/${{ matrix.target }}/release/clean-framework" stage/
+            chmod +x stage/clean-framework
+          fi
+
+      - name: pack tar.gz
+        if: matrix.ext == 'tar.gz'
+        working-directory: clean-framework
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="${{ steps.version.outputs.asset_base }}.tar.gz"
+          tar -C stage -czf "$name" .
+          shasum -a 256 "$name" | awk '{print $1"  "$2}' > "$name.sha256"
+          ls -la "$name" "$name.sha256"
+
+      - name: pack zip
+        if: matrix.ext == 'zip'
+        working-directory: clean-framework
+        shell: pwsh
+        run: |
+          $name = "${{ steps.version.outputs.asset_base }}.zip"
+          Compress-Archive -Path stage/* -DestinationPath $name
+          $hash = (Get-FileHash -Algorithm SHA256 $name).Hash.ToLower()
+          "$hash  $name" | Out-File -FilePath "$name.sha256" -Encoding ascii -NoNewline
+
+      - name: upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: clean-framework-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            clean-framework/clean-framework-*.tar.gz
+            clean-framework/clean-framework-*.tar.gz.sha256
+            clean-framework/clean-framework-*.zip
+            clean-framework/clean-framework-*.zip.sha256
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: list assets
+        run: ls -la dist
+
+      - name: create github release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

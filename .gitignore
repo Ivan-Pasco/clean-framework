@@ -1,0 +1,11 @@
+/target
+
+# Editor-local, machine-specific (absolute toolchain paths).
+/.vscode/
+
+# Build output of the test fixtures. The fixtures themselves are committed;
+# what a build produces from them is not.
+**/dist/
+
+# Cargo.lock IS committed — this repo ships a binary, so the lockfile is what
+# makes a release reproducible.

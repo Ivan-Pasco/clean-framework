@@ -1,0 +1,22 @@
+[package]
+name = "framework-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The clean-framework binary: argv adapter over framework-core."
+
+[[bin]]
+name = "clean-framework"
+path = "src/main.rs"
+
+[dependencies]
+framework-core = { workspace = true }
+framework-compiler-driver = { workspace = true }
+clap = { workspace = true }
+semver = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

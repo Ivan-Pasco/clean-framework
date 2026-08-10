@@ -1,0 +1,110 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: clean-framework
+
+      # framework depends on cln-shared and cln-layout by path while both
+      # repos are pre-1.0 (see the workspace Cargo.toml). CI must lay the
+      # sibling out the same way a developer's machine does. This step goes
+      # away when those become git or registry pins at M1.
+      #
+      # clean-manager is private, and the default GITHUB_TOKEN is scoped to
+      # this repository only — so this needs a PAT with read access to it,
+      # stored as the CLEAN_MANAGER_TOKEN secret. Without it, checkout fails
+      # with "repository not found" rather than a permissions message.
+      - name: check out clean-manager
+        uses: actions/checkout@v4
+        with:
+          repository: Ivan-Pasco/clean-manager
+          path: clean-manager
+          token: ${{ secrets.CLEAN_MANAGER_TOKEN }}
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clean-framework
+
+      - name: clippy
+        working-directory: clean-framework
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        working-directory: clean-framework
+        run: cargo test --workspace
+
+      # The framework's own determinism invariant (PLAN.md §7): the same
+      # project state must produce a byte-identical request document on every
+      # OS. This is what makes the compiler's CMP-02 externally provable, so a
+      # cross-platform difference is a release blocker, not a curiosity.
+      - name: determinism — request document hash
+        working-directory: clean-framework
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --quiet --bin clean-framework --bin fake-compiler
+          hash_of() {
+            ./target/debug/clean-framework build "$1" \
+              --compiler ./target/debug/fake-compiler 2>/dev/null \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["request_sha256"])'
+          }
+          # Build the same fixture from two different absolute paths: the hash
+          # must depend on project content only, never on where it lives.
+          cp -r testing/fixtures/hello-world "${RUNNER_TEMP}/hello-elsewhere"
+          a="$(hash_of testing/fixtures/hello-world)"
+          b="$(hash_of "${RUNNER_TEMP}/hello-elsewhere")"
+          echo "in-tree:  $a"
+          echo "relocated: $b"
+          [ "$a" = "$b" ] || { echo "request document is not path-independent"; exit 1; }
+          echo "$a" > "request-sha256-${{ matrix.os }}.txt"
+
+      - name: upload request hash
+        uses: actions/upload-artifact@v4
+        with:
+          name: request-sha256-${{ matrix.os }}
+          path: clean-framework/request-sha256-${{ matrix.os }}.txt
+
+  cross-platform-determinism:
+    name: determinism across platforms
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: download hashes
+        uses: actions/download-artifact@v4
+        with:
+          path: hashes
+          merge-multiple: true
+
+      - name: compare
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -la hashes
+          # Every OS must have produced the same request-document hash for the
+          # same fixture. A mismatch means discovery order, line endings, or
+          # path separators leaked into the document.
+          unique="$(cat hashes/*.txt | sort -u | wc -l | tr -d ' ')"
+          cat hashes/*.txt
+          [ "$unique" = "1" ] || { echo "request document differs across platforms"; exit 1; }

@@ -1,0 +1,55 @@
+{
+  "spec_version": "1",
+  "project": {
+    "name": "my-app",
+    "version": "0.1.0"
+  },
+  "build": {
+    "target": "wasm32-server",
+    "optimization": "release",
+    "memory": { "tier": "standard" },
+    "strip": true,
+    "component_model": true,
+    "memory64": false
+  },
+  "folders": {
+    "app/data":   ["data"],
+    "app/server": ["server"]
+  },
+  "dependencies": {
+    "data":   { "version": "1.4.0", "resolved_from": "registry" },
+    "server": { "version": "1.4.0", "resolved_from": "registry" }
+  },
+  "compile_limits": {
+    "handler_timeout_ms": 5000,
+    "handler_memory_mb": 128,
+    "total_timeout_min": 10,
+    "max_file_size_mb": 4,
+    "max_import_depth": 32
+  },
+  "telemetry": { "consent_level": "error-with-code" },
+  "sources": [
+    {
+      "path": "app/main.cln",
+      "sha256": "e3b0c44",
+      "content": "start()\n  console.print(\"hello\")\n"
+    },
+    {
+      "path": "app/data/User.cln",
+      "sha256": "8fa16c",
+      "content": "..."
+    }
+  ],
+  "library_manifests": [
+    {
+      "name": "data",
+      "version": "1.4.0",
+      "wit": "package clean:library/data@0.1.0;\n...",
+      "handles_blocks": ["data", "endpoints"],
+      "compiletime_wasm_sha256": "d41d8c"
+    }
+  ],
+  "overrides": [
+    { "path": "build.optimization", "value": "debug", "source": "cli" }
+  ]
+}

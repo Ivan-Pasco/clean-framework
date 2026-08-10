@@ -1,0 +1,23 @@
+[package]
+name = "framework-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Build orchestration for Clean Framework: discovery, lowering, request assembly."
+
+[dependencies]
+framework-compiler-driver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+semver = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+framework-compiler-driver = { workspace = true }
+semver = { workspace = true }
+tempfile = { workspace = true }
+serde_json = { workspace = true }

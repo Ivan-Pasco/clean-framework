@@ -1,0 +1,21 @@
+[package]
+name = "framework-compiler-driver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The single seam between Clean Framework and the Clean compiler binary."
+
+[dependencies]
+cln-shared = { workspace = true }
+cln-layout = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+semver = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+tar = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

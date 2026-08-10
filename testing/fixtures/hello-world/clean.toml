@@ -1,0 +1,7 @@
+[project]
+name = "hello-world"
+version = "0.1.0"
+description = "The M0 acceptance fixture: the smallest project that builds."
+
+[build]
+target = "wasm32-cli"
