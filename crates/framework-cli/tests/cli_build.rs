@@ -48,7 +48,7 @@ fn hello_world_project() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("clean.toml"),
-        "[project]\nname = \"hello-world\"\nversion = \"0.1.0\"\n\n[build]\ntarget = \"wasm32-cli\"\n\n[target]\nhost = \"wasmtime_runner\"\nversion = \"0.1.0\"\n",
+        "[project]\nname = \"hello-world\"\nversion = \"0.1.0\"\n\n[build]\ntarget = \"wasm32-cli\"\n\n[target]\nhost = \"clean-cli\"\nversion = \"0.1.0\"\n",
     )
     .unwrap();
     std::fs::create_dir_all(dir.path().join("app")).unwrap();

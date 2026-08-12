@@ -7,5 +7,5 @@ description = "The M0 acceptance fixture: the smallest project that builds."
 target = "wasm32-cli"
 
 [target]
-host = "wasmtime_runner"
+host = "clean-cli"
 version = "0.1.0"

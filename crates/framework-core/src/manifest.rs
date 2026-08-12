@@ -279,7 +279,7 @@ version = "0.1.0"
 target = "wasm32-cli"
 
 [target]
-host = "wasmtime_runner"
+host = "clean-cli"
 version = "0.1.0"
 "#;
 
@@ -354,7 +354,7 @@ version = "0.1.0"
             format!(
                 "[project]\nname = \"x\"\nversion = \"0.1.0\"\n\n\
                  [build]\ntarget = \"wasm32-cli\"\n{spelling} = {value}\n\n\
-                 [target]\nhost = \"wasmtime_runner\"\nversion = \"0.1.0\"\n"
+                 [target]\nhost = \"clean-cli\"\nversion = \"0.1.0\"\n"
             )
         };
 
@@ -374,7 +374,7 @@ version = "0.1.0"
         write_manifest(dir.path(), MINIMAL);
         let m = Manifest::load(dir.path()).unwrap();
         let target = m.target_section().unwrap();
-        assert_eq!(target.host, "wasmtime_runner");
+        assert_eq!(target.host, "clean-cli");
         assert_eq!(target.version, "0.1.0");
         assert_eq!(target.wit_source, None);
     }

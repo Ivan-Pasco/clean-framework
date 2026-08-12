@@ -48,15 +48,15 @@ pub const LOCKFILE: &str = ".cln/lock.toml";
 const OFFICIAL_HOSTS: &[(&str, &str)] = &[
     (
         "clean-server",
-        "https://raw.githubusercontent.com/clean-language/clean-server/v{version}/host.wit",
+        "https://raw.githubusercontent.com/Ivan-Pasco/clean-server/v{version}/host.wit",
     ),
     (
-        "browser",
-        "https://raw.githubusercontent.com/clean-language/clean-framework/v{version}/hosts/browser/host.wit",
+        "clean-browser",
+        "https://raw.githubusercontent.com/Ivan-Pasco/clean-framework/v{version}/hosts/clean-browser/host.wit",
     ),
     (
-        "wasmtime_runner",
-        "https://raw.githubusercontent.com/clean-language/clean-manager/v{version}/hosts/wasmtime_runner/host.wit",
+        "clean-cli",
+        "https://raw.githubusercontent.com/Ivan-Pasco/clean-manager/v{version}/hosts/clean-cli/host.wit",
     ),
 ];
 
@@ -382,7 +382,7 @@ mod tests {
         }
     }
 
-    const SERVER_WIT: &str = "package clean:http@0.1.0;\n\nworld server {\n  export routing;\n}\n";
+    const SERVER_WIT: &str = "package clean:host@0.1.0;\n\nworld server {\n  export routing;\n}\n";
 
     fn cache() -> (tempfile::TempDir, HostWitCache) {
         let dir = tempfile::tempdir().unwrap();
@@ -415,7 +415,7 @@ mod tests {
         // ADR-0033 Option F rejected: the framework must not rewrite the
         // contract. Comments and formatting survive so `cln repro build` shows
         // what the host published.
-        let source = "// a comment the host wrote\npackage clean:http@0.1.0;\n\nworld server {}\n";
+        let source = "// a comment the host wrote\npackage clean:host@0.1.0;\n\nworld server {}\n";
         let (_dir, cache) = cache();
         let contract = resolve_contract(
             "clean-server", "0.6.0", None, &cache, Network::Allowed, Some(&Canned(source)), None,
@@ -531,7 +531,7 @@ mod tests {
         };
         pin_hash(dir.path(), &contract).unwrap();
         assert_eq!(pinned_hash(dir.path(), "clean-server").unwrap().as_deref(), Some("abc123"));
-        assert_eq!(pinned_hash(dir.path(), "browser").unwrap(), None);
+        assert_eq!(pinned_hash(dir.path(), "clean-browser").unwrap(), None);
     }
 
     #[test]

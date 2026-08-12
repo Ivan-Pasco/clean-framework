@@ -181,11 +181,11 @@ mod tests {
         }]
     }
 
-    const CLI_WIT: &str = "package clean:host/cli@0.1.0;\nworld cli {}\n";
+    const CLI_WIT: &str = "package clean:host@0.1.0;\nworld cli {}\n";
 
     fn contract() -> HostContract {
         HostContract {
-            host: "wasmtime_runner".into(),
+            host: "clean-cli".into(),
             version: "0.1.0".into(),
             sha256: "9f2b1c".into(),
             wit: CLI_WIT.into(),
@@ -300,7 +300,7 @@ version = "0.1.0"
 target = "wasm32-cli"
 
 [target]
-host = "wasmtime_runner"
+host = "clean-cli"
 version = "0.1.x"
 "#,
         );
@@ -308,7 +308,7 @@ version = "0.1.x"
 
         assert_eq!(doc.target_world.wit, CLI_WIT, "the WIT must not be rewritten");
         assert_eq!(doc.target_world.world, "cli");
-        assert_eq!(doc.target_world.host, "wasmtime_runner");
+        assert_eq!(doc.target_world.host, "clean-cli");
         assert_eq!(doc.target_world.sha256, "9f2b1c");
         // The manifest says "0.1.x"; the request must carry the resolved
         // version, or two identical requests could mean different hosts.
@@ -325,7 +325,7 @@ version = "0.1.x"
         assert_eq!(lower(&server, &contract(), hello_sources(), &[]).target_world.world, "server");
 
         let browser = manifest_from(
-            "[project]\nname = \"x\"\nversion = \"0.1.0\"\n[build]\ntarget = \"wasm32-browser\"\n[target]\nhost = \"browser\"\nversion = \"0.1.0\"\n",
+            "[project]\nname = \"x\"\nversion = \"0.1.0\"\n[build]\ntarget = \"wasm32-browser\"\n[target]\nhost = \"clean-browser\"\nversion = \"0.1.0\"\n",
         );
         assert_eq!(lower(&browser, &contract(), hello_sources(), &[]).target_world.world, "browser");
 

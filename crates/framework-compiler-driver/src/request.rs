@@ -226,11 +226,11 @@ mod tests {
             compile_limits: None,
             telemetry: None,
             target_world: TargetWorld {
-                host: "wasmtime_runner".into(),
+                host: "clean-cli".into(),
                 version: "0.1.0".into(),
                 world: "cli".into(),
                 sha256: "9f2b1c".into(),
-                wit: "package clean:host/cli@0.1.0;\nworld cli {}\n".into(),
+                wit: "package clean:host@0.1.0;\nworld cli {}\n".into(),
             },
             sources: vec![Source {
                 path: "app/main.cln".into(),

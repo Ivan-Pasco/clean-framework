@@ -133,7 +133,7 @@ version = "0.1.0"
 target = "wasm32-cli"
 
 [target]
-host = "wasmtime_runner"
+host = "clean-cli"
 version = "0.1.0"
 "#,
         );
@@ -432,7 +432,7 @@ fn the_request_carries_the_host_contract_verbatim() {
 
     let on_disk = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testing/fixtures/host-wit/wasmtime_runner@0.1.0.wit"),
+            .join("../../testing/fixtures/host-wit/clean-cli@0.1.0.wit"),
     )
     .unwrap();
 
@@ -441,7 +441,7 @@ fn the_request_carries_the_host_contract_verbatim() {
         "the contract must cross the seam byte-for-byte"
     );
     assert_eq!(request.target_world.world, "cli");
-    assert_eq!(request.target_world.host, "wasmtime_runner");
+    assert_eq!(request.target_world.host, "clean-cli");
     assert_eq!(request.target_world.version, "0.1.0");
     assert_eq!(request.target_world.sha256.len(), 64);
 }
@@ -455,7 +455,7 @@ fn the_first_build_pins_the_contract_hash_in_the_lockfile() {
     let request = assemble_request(&project.inputs()).unwrap();
 
     let lock = String::from_utf8(project.read(".cln/lock.toml")).unwrap();
-    assert!(lock.contains("wasmtime_runner"), "lockfile was: {lock}");
+    assert!(lock.contains("clean-cli"), "lockfile was: {lock}");
     assert!(
         lock.contains(&request.target_world.sha256),
         "the pinned hash must be the contract's: {lock}"
@@ -494,7 +494,7 @@ fn a_lockfile_pinning_a_different_contract_fails_the_build() {
     let project = Project::hello();
     project.write(
         ".cln/lock.toml",
-        "[host.wasmtime_runner]\nversion = \"0.1.0\"\n\
+        "[host.clean-cli]\nversion = \"0.1.0\"\n\
          sha256 = \"0000000000000000000000000000000000000000000000000000000000000000\"\n",
     );
 
@@ -534,7 +534,7 @@ fn a_target_whose_world_the_contract_lacks_is_refused_at_moment_1() {
         "clean.toml",
         "[project]\nname = \"x\"\nversion = \"0.1.0\"\n\n\
          [build]\ntarget = \"wasm32-server\"\n\n\
-         [target]\nhost = \"wasmtime_runner\"\nversion = \"0.1.0\"\n",
+         [target]\nhost = \"clean-cli\"\nversion = \"0.1.0\"\n",
     );
 
     let err = assemble_request(&project.inputs()).unwrap_err();
@@ -554,9 +554,9 @@ fn changing_the_contract_changes_the_request_hash() {
     let cache = framework_core::HostWitCache::at(other.path());
     cache
         .put(
-            "wasmtime_runner",
+            "clean-cli",
             "0.1.0",
-            "package clean:host/cli@0.1.0;\nworld cli {\n  import extra: func();\n}\n",
+            "package clean:host@0.1.0;\nworld cli {\n  import extra: func();\n}\n",
         )
         .unwrap();
 
