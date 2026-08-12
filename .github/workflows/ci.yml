@@ -69,9 +69,13 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --quiet --bin clean-framework --bin fake-compiler
+          # Absolute, because the second build runs against a copy in
+          # RUNNER_TEMP and a relative cache path would resolve differently.
+          host_wit="$PWD/testing/fixtures/host-wit"
           hash_of() {
             ./target/debug/clean-framework build "$1" \
-              --compiler ./target/debug/fake-compiler 2>/dev/null \
+              --compiler ./target/debug/fake-compiler \
+              --host-wit-cache "$host_wit" 2>/dev/null \
               | python3 -c 'import json,sys; print(json.load(sys.stdin)["request_sha256"])'
           }
           # Build the same fixture from two different absolute paths: the hash

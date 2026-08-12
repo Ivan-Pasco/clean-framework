@@ -7,5 +7,12 @@
 # what a build produces from them is not.
 **/dist/
 
+# Same rule for the lockfile a build writes into a fixture. `.cln/lock.toml`
+# pins the host-contract hash (BVER-03), which is real output for a real
+# project — but committing it here would make the fixture's first build
+# different from every later one, and would need updating whenever the test
+# contract changes.
+testing/fixtures/**/.cln/
+
 # Cargo.lock IS committed — this repo ships a binary, so the lockfile is what
 # makes a release reproducible.
