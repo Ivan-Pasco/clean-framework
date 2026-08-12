@@ -107,6 +107,13 @@ fn compiler() -> SubprocessCompiler {
     SubprocessCompiler::at(fake_compiler(), semver::Version::new(0, 0, 0))
 }
 
+/// The checked-in host contracts, standing in for `~/.cln/host-wit/`.
+fn host_wit_cache() -> framework_core::HostWitCache {
+    framework_core::HostWitCache::at(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testing/fixtures/host-wit"),
+    )
+}
+
 struct Project {
     dir: tempfile::TempDir,
 }
@@ -124,6 +131,10 @@ version = "0.1.0"
 
 [build]
 target = "wasm32-cli"
+
+[target]
+host = "wasmtime_runner"
+version = "0.1.0"
 "#,
         );
         project.write("app/main.cln", "start:\n\tprint(\"hello\")\n");
@@ -132,6 +143,15 @@ target = "wasm32-cli"
 
     fn path(&self) -> &Path {
         self.dir.path()
+    }
+
+    /// Build inputs pointed at the checked-in host contracts.
+    ///
+    /// Every test goes through this rather than `BuildInputs::new` so no test
+    /// reads or writes the developer's real `~/.cln/host-wit/` — and so none
+    /// can pass by accident because a contract happened to be cached there.
+    fn inputs(&self) -> BuildInputs {
+        BuildInputs::new(self.path()).with_host_wit_cache(host_wit_cache())
     }
 
     fn write(&self, relative: &str, body: &str) {
@@ -159,7 +179,7 @@ target = "wasm32-cli"
 fn hello_world_builds_to_dist_app_wasm() {
     let _env = FakeCompilerEnv::none();
     let project = Project::hello();
-    let outcome = build(&BuildInputs::new(project.path()), &compiler()).expect("build must succeed");
+    let outcome = build(&project.inputs(), &compiler()).expect("build must succeed");
 
     // FRM-BO-09: the framework owns naming and placement.
     assert_eq!(outcome.dist_wasm, project.path().join("dist/app.wasm"));
@@ -179,7 +199,7 @@ fn hello_world_builds_to_dist_app_wasm() {
 fn build_manifest_is_written_verbatim_from_the_compiler() {
     let _env = FakeCompilerEnv::none();
     let project = Project::hello();
-    build(&BuildInputs::new(project.path()), &compiler()).unwrap();
+    build(&project.inputs(), &compiler()).unwrap();
 
     let manifest: serde_json::Value =
         serde_json::from_slice(&project.read("dist/build-manifest.json")).unwrap();
@@ -201,11 +221,11 @@ fn the_request_crossing_the_seam_is_what_we_assembled() {
     {
         let _env =
             FakeCompilerEnv::set(&[("FAKE_COMPILER_ECHO_REQUEST", &echo.to_string_lossy())]);
-        build(&BuildInputs::new(project.path()), &compiler()).unwrap();
+        build(&project.inputs(), &compiler()).unwrap();
     }
 
     let on_the_wire = std::fs::read(&echo).unwrap();
-    let assembled = assemble_request(&BuildInputs::new(project.path()))
+    let assembled = assemble_request(&project.inputs())
         .unwrap()
         .to_canonical_json()
         .unwrap();
@@ -219,7 +239,7 @@ fn sources_are_sorted_and_hashed_correctly() {
     project.write("app/zebra.cln", "z()\n");
     project.write("app/alpha.cln", "a()\n");
 
-    let request = assemble_request(&BuildInputs::new(project.path())).unwrap();
+    let request = assemble_request(&project.inputs()).unwrap();
     let paths: Vec<_> = request.sources.iter().map(|s| s.path.as_str()).collect();
     assert_eq!(paths, ["app/alpha.cln", "app/main.cln", "app/zebra.cln"]);
 
@@ -234,7 +254,7 @@ fn sources_are_sorted_and_hashed_correctly() {
 #[test]
 fn overrides_ride_alongside_the_config_frm_bo_08() {
     let project = Project::hello();
-    let inputs = BuildInputs::new(project.path())
+    let inputs = project.inputs()
         .with_overrides(vec![ConfigOverride::cli("build.optimization", "debug")]);
 
     let request = assemble_request(&inputs).unwrap();
@@ -254,7 +274,7 @@ fn failure_is_total_dist_is_untouched_frm_bo_10() {
     // First build succeeds and populates dist/.
     {
         let _env = FakeCompilerEnv::none();
-        build(&BuildInputs::new(project.path()), &compiler()).unwrap();
+        build(&project.inputs(), &compiler()).unwrap();
     }
     let good_wasm = project.read("dist/app.wasm");
     let good_manifest = project.read("dist/build-manifest.json");
@@ -265,7 +285,7 @@ fn failure_is_total_dist_is_untouched_frm_bo_10() {
             ("FAKE_COMPILER_FAIL", "1"),
             ("FAKE_COMPILER_DIAGNOSTIC", "unknown identifier `pritn`"),
         ]);
-        build(&BuildInputs::new(project.path()), &compiler())
+        build(&project.inputs(), &compiler())
     };
 
     let err = result.expect_err("compiler failure must fail the build");
@@ -287,7 +307,7 @@ fn no_staging_directory_survives_a_failed_build() {
 
     {
         let _env = FakeCompilerEnv::set(&[("FAKE_COMPILER_FAIL", "1")]);
-        let _ = build(&BuildInputs::new(project.path()), &compiler());
+        let _ = build(&project.inputs(), &compiler());
     }
 
     let leftovers: Vec<_> = std::fs::read_dir(project.path())
@@ -303,12 +323,12 @@ fn no_staging_directory_survives_a_failed_build() {
 fn a_second_successful_build_replaces_dist_cleanly() {
     let _env = FakeCompilerEnv::none();
     let project = Project::hello();
-    build(&BuildInputs::new(project.path()), &compiler()).unwrap();
+    build(&project.inputs(), &compiler()).unwrap();
 
     // A stale file from an older build must not survive the swap — dist/ is
     // replaced, not merged.
     project.write("dist/stale-artifact.txt", "left over");
-    build(&BuildInputs::new(project.path()), &compiler()).unwrap();
+    build(&project.inputs(), &compiler()).unwrap();
 
     assert!(project.exists("dist/app.wasm"));
     assert!(!project.exists("dist/stale-artifact.txt"), "dist/ must be replaced, not merged");
@@ -320,7 +340,7 @@ fn warnings_survive_a_successful_build() {
 
     let outcome = {
         let _env = FakeCompilerEnv::set(&[("FAKE_COMPILER_WARN", "unused variable `x`")]);
-        build(&BuildInputs::new(project.path()), &compiler())
+        build(&project.inputs(), &compiler())
     };
 
     let outcome = outcome.unwrap();
@@ -336,7 +356,7 @@ fn malformed_compiler_output_is_a_seam_error_not_a_crash() {
 
     let result = {
         let _env = FakeCompilerEnv::set(&[("FAKE_COMPILER_GARBAGE", "1")]);
-        build(&BuildInputs::new(project.path()), &compiler())
+        build(&project.inputs(), &compiler())
     };
 
     let err = result.expect_err("non-tar stdout must fail the build");
@@ -349,7 +369,7 @@ fn non_utf8_source_fails_with_cfg005_before_the_compiler_runs() {
     let project = Project::hello();
     project.write_bytes("app/broken.cln", &[0x73, 0xFF, 0x0A]);
 
-    let err = build(&BuildInputs::new(project.path()), &compiler()).unwrap_err();
+    let err = build(&project.inputs(), &compiler()).unwrap_err();
     assert_eq!(err.code(), "CFG005");
     assert!(!project.exists("dist/app.wasm"));
 }
@@ -360,7 +380,7 @@ fn missing_manifest_fails_before_discovery() {
     std::fs::create_dir_all(dir.path().join("app")).unwrap();
     std::fs::write(dir.path().join("app/main.cln"), "start:\n\tprint(\"hi\")\n").unwrap();
 
-    let err = build(&BuildInputs::new(dir.path()), &compiler()).unwrap_err();
+    let err = build(&BuildInputs::new(dir.path()).with_host_wit_cache(host_wit_cache()), &compiler()).unwrap_err();
     assert_eq!(err.code(), "CFG003");
 }
 
@@ -372,7 +392,7 @@ fn unknown_target_fails_with_cfg001() {
         "[project]\nname = \"x\"\nversion = \"0.1.0\"\n[build]\ntarget = \"wasm32-toaster\"\n",
     );
 
-    let err = build(&BuildInputs::new(project.path()), &compiler()).unwrap_err();
+    let err = build(&project.inputs(), &compiler()).unwrap_err();
     assert_eq!(err.code(), "CFG001");
 }
 
@@ -384,8 +404,8 @@ fn the_request_document_is_deterministic() {
     project.write("app/b.cln", "b()\n");
     project.write("app/a.cln", "a()\n");
 
-    let first = assemble_request(&BuildInputs::new(project.path())).unwrap();
-    let second = assemble_request(&BuildInputs::new(project.path())).unwrap();
+    let first = assemble_request(&project.inputs()).unwrap();
+    let second = assemble_request(&project.inputs()).unwrap();
     assert_eq!(first.to_canonical_json().unwrap(), second.to_canonical_json().unwrap());
     assert_eq!(first.sha256().unwrap(), second.sha256().unwrap());
 }
@@ -395,12 +415,159 @@ fn editing_a_source_changes_the_request_hash() {
     // The flip side of determinism: `cln dev` relies on this hash to decide
     // whether anything actually changed (PLAN.md §6 step 4b).
     let project = Project::hello();
-    let before = assemble_request(&BuildInputs::new(project.path())).unwrap().sha256().unwrap();
+    let before = assemble_request(&project.inputs()).unwrap().sha256().unwrap();
 
     project.write("app/main.cln", "start:\n\tprint(\"goodbye\")\n");
-    let after = assemble_request(&BuildInputs::new(project.path())).unwrap().sha256().unwrap();
+    let after = assemble_request(&project.inputs()).unwrap().sha256().unwrap();
 
     assert_ne!(before, after);
+}
+
+#[test]
+fn the_request_carries_the_host_contract_verbatim() {
+    // FRM-BO-16 end to end: the contract on disk reaches the request unchanged,
+    // with the world selected from build.target.
+    let project = Project::hello();
+    let request = assemble_request(&project.inputs()).unwrap();
+
+    let on_disk = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testing/fixtures/host-wit/wasmtime_runner@0.1.0.wit"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        request.target_world.wit, on_disk,
+        "the contract must cross the seam byte-for-byte"
+    );
+    assert_eq!(request.target_world.world, "cli");
+    assert_eq!(request.target_world.host, "wasmtime_runner");
+    assert_eq!(request.target_world.version, "0.1.0");
+    assert_eq!(request.target_world.sha256.len(), 64);
+}
+
+#[test]
+fn the_first_build_pins_the_contract_hash_in_the_lockfile() {
+    // BVER-03: every build is reproducible against a pinned host contract.
+    let project = Project::hello();
+    assert!(!project.exists(".cln/lock.toml"));
+
+    let request = assemble_request(&project.inputs()).unwrap();
+
+    let lock = String::from_utf8(project.read(".cln/lock.toml")).unwrap();
+    assert!(lock.contains("wasmtime_runner"), "lockfile was: {lock}");
+    assert!(
+        lock.contains(&request.target_world.sha256),
+        "the pinned hash must be the contract's: {lock}"
+    );
+}
+
+#[test]
+fn pinning_happens_once_not_on_every_assemble() {
+    // `assemble_request` is also how `cln dev` asks "did anything change?", so
+    // it runs constantly. Rewriting the lockfile each time would churn a
+    // version-controlled file on every keystroke and make the watcher see its
+    // own writes.
+    let project = Project::hello();
+    assemble_request(&project.inputs()).unwrap();
+
+    let after_first = project.read(".cln/lock.toml");
+    let mtime = std::fs::metadata(project.path().join(".cln/lock.toml"))
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    assemble_request(&project.inputs()).unwrap();
+
+    assert_eq!(project.read(".cln/lock.toml"), after_first, "content must not change");
+    assert_eq!(
+        std::fs::metadata(project.path().join(".cln/lock.toml")).unwrap().modified().unwrap(),
+        mtime,
+        "an already-pinned contract must not be rewritten"
+    );
+}
+
+#[test]
+fn a_lockfile_pinning_a_different_contract_fails_the_build() {
+    // The tamper/republish case. Silently rebuilding against a changed contract
+    // would defeat the point of pinning it.
+    let project = Project::hello();
+    project.write(
+        ".cln/lock.toml",
+        "[host.wasmtime_runner]\nversion = \"0.1.0\"\n\
+         sha256 = \"0000000000000000000000000000000000000000000000000000000000000000\"\n",
+    );
+
+    let err = assemble_request(&project.inputs()).unwrap_err();
+    assert_eq!(err.code(), "FRM005");
+    assert!(err.help().unwrap().contains("lock.toml"), "must say how to re-pin");
+}
+
+#[test]
+fn offline_builds_from_a_warm_cache() {
+    // C-18: every command works offline once the cache is warm.
+    let project = Project::hello();
+    let request = assemble_request(&project.inputs().offline(true)).unwrap();
+    assert_eq!(request.target_world.world, "cli");
+}
+
+#[test]
+fn offline_with_a_cold_cache_fails_without_reaching_the_compiler() {
+    let project = Project::hello();
+    let empty = tempfile::tempdir().unwrap();
+
+    let inputs = BuildInputs::new(project.path())
+        .with_host_wit_cache(framework_core::HostWitCache::at(empty.path()))
+        .offline(true);
+
+    let err = build(&inputs, &compiler()).unwrap_err();
+    assert_eq!(err.code(), "FRM004");
+    assert!(!project.exists("dist/app.wasm"), "nothing may be built without a world");
+}
+
+#[test]
+fn a_target_whose_world_the_contract_lacks_is_refused_at_moment_1() {
+    // The failure worth catching here: one message naming host and world,
+    // rather than COM012 on every host-function call site later.
+    let project = Project::hello();
+    project.write(
+        "clean.toml",
+        "[project]\nname = \"x\"\nversion = \"0.1.0\"\n\n\
+         [build]\ntarget = \"wasm32-server\"\n\n\
+         [target]\nhost = \"wasmtime_runner\"\nversion = \"0.1.0\"\n",
+    );
+
+    let err = assemble_request(&project.inputs()).unwrap_err();
+    assert_eq!(err.code(), "CFG001");
+    assert!(err.to_string().contains("server"), "must name the world: {err}");
+}
+
+#[test]
+fn changing_the_contract_changes_the_request_hash() {
+    // The cache-key property ADR-0033 turns on: a component validated against a
+    // different contract is a different build, even with identical sources.
+    let project = Project::hello();
+    let baseline = assemble_request(&project.inputs()).unwrap().sha256().unwrap();
+
+    // A second cache holding a different contract under the same coordinates.
+    let other = tempfile::tempdir().unwrap();
+    let cache = framework_core::HostWitCache::at(other.path());
+    cache
+        .put(
+            "wasmtime_runner",
+            "0.1.0",
+            "package clean:host/cli@0.1.0;\nworld cli {\n  import extra: func();\n}\n",
+        )
+        .unwrap();
+
+    // The lockfile from the first call pins the original contract, so drop it —
+    // otherwise this would (correctly) fail as a mismatch instead.
+    std::fs::remove_file(project.path().join(".cln/lock.toml")).unwrap();
+
+    let inputs = BuildInputs::new(project.path()).with_host_wit_cache(cache);
+    let changed = assemble_request(&inputs).unwrap().sha256().unwrap();
+
+    assert_ne!(baseline, changed);
 }
 
 #[test]
@@ -420,7 +587,7 @@ fn a_missing_compiler_binary_is_a_spawn_error() {
     let project = Project::hello();
     let absent = SubprocessCompiler::at("/nonexistent/clean-compiler", semver::Version::new(1, 0, 0));
 
-    let err = build(&BuildInputs::new(project.path()), &absent).unwrap_err();
+    let err = build(&project.inputs(), &absent).unwrap_err();
     assert_eq!(err.code(), "FRM001");
     assert!(
         matches!(

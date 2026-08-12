@@ -23,13 +23,15 @@
 pub mod build;
 pub mod discover;
 pub mod errors;
+pub mod hostwit;
 pub mod lower;
 pub mod manifest;
 
 pub use build::{assemble_request, build, BuildInputs, BuildOutcome, APP_WASM, DIST_DIR};
-pub use errors::{DiscoveryError, FrameworkError, ManifestError};
+pub use errors::{DiscoveryError, FrameworkError, HostWitError, ManifestError};
+pub use hostwit::{HostContract, HostWitCache, Network, WitFetcher};
 pub use lower::{ConfigOverride, OverrideSource};
-pub use manifest::Manifest;
+pub use manifest::{Manifest, TargetSection};
 
 /// This framework's own version, per PLAN.md open question #2 (resolved).
 ///

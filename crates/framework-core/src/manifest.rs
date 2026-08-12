@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::errors::{FrameworkError, ManifestError};
+use crate::errors::{FrameworkError, HostWitError, ManifestError};
 
 /// The manifest file name. Exactly one per project root (CONF-01).
 pub const MANIFEST_FILE: &str = "clean.toml";
@@ -28,6 +28,12 @@ pub struct Manifest {
 
     #[serde(default)]
     pub build: Option<BuildSection>,
+
+    /// `[target]` — which host contract to build against. Required by the
+    /// schema; `Option` here so a missing block produces `CFG001` naming the
+    /// section rather than a serde parse error.
+    #[serde(default)]
+    pub target: Option<TargetSection>,
 
     /// Glob pattern -> libraries in scope. Carried through lowering verbatim
     /// (§11.4); unused in M0 because there are no libraries yet.
@@ -90,6 +96,41 @@ pub struct BuildSection {
     pub exclude: Vec<String>,
 }
 
+/// `[target]` — the host contract the project builds against
+/// ([schema](clean.toml.md), Platform 16 §16.5).
+///
+/// This names *which* contract to fetch; it never carries one. The contract
+/// itself is the host's `host.wit`, fetched at Moment 1 and threaded into the
+/// request document as `target_world` (FRM-BO-16).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TargetSection {
+    /// Host name, e.g. `"clean-server"`.
+    pub host: String,
+
+    /// Host version **constraint** — may be a range such as `"0.1.x"`. The
+    /// concrete version it resolves to is pinned in `.cln/lock.toml`, and that
+    /// is what reaches the compiler.
+    pub version: String,
+
+    /// Where to fetch `host.wit`. Absent for official hosts, which resolve
+    /// from the built-in registry; third-party hosts must supply it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wit_source: Option<String>,
+}
+
+/// Which world each built-in target maps to (Platform 07 §7.2). This is the
+/// `world` field of `target_world`: the framework selects, the compiler is
+/// told. Resolving it compiler-side is what BVER-03 forbids.
+pub fn world_for_target(target: &str) -> Option<&'static str> {
+    match target {
+        "wasm32-server" | "wasm64-server" => Some("server"),
+        "wasm32-browser" => Some("browser"),
+        "wasm32-cli" => Some("cli"),
+        "wasm32-embedded" => Some("embedded"),
+        _ => None,
+    }
+}
+
 /// The built-in targets (Platform 07 §7.4, CONF-02). Third-party targets are
 /// declared through Manager, which M0 does not consult — an unknown target is
 /// `CFG001` here.
@@ -149,12 +190,58 @@ impl Manifest {
             .into());
         }
 
+        // `[target]` is required by the schema (ADR-0033, FRM-BO-16). There is
+        // deliberately no default host: guessing would move the developer's
+        // first confusing failure from this manifest line to an instantiation
+        // error with no line number attached.
+        let target_section = self.target.as_ref().ok_or_else(|| HostWitError::MissingSection {
+            path: path.to_path_buf(),
+        })?;
+
+        if target_section.host.trim().is_empty() {
+            return Err(HostWitError::MissingSection { path: path.to_path_buf() }.into());
+        }
+
+        // A host we do not know and that gives us no source cannot be fetched.
+        // Catching it here means the message arrives before discovery rather
+        // than after, and names the manifest rather than a URL.
+        if target_section.wit_source.is_none() && !crate::hostwit::is_official(&target_section.host)
+        {
+            return Err(HostWitError::UnknownHost {
+                host: target_section.host.clone(),
+                known: crate::hostwit::official_hosts(),
+            }
+            .into());
+        }
+
+        // Every built-in target maps to a world; a target that does not is a
+        // gap in `world_for_target`, not a user error — but it must not reach
+        // the request document as an empty string.
+        if world_for_target(target).is_none() {
+            return Err(HostWitError::NoWorldForTarget {
+                path: path.to_path_buf(),
+                target: target.to_string(),
+            }
+            .into());
+        }
+
         Ok(())
     }
 
     /// `build.target`. Required — CONF-02 gives it no default.
     pub fn target(&self) -> Option<&str> {
         self.build.as_ref()?.target.as_deref()
+    }
+
+    /// The `[target]` host-contract block. Required by the schema; validated in
+    /// [`Manifest::validate`] so the failure names the section.
+    pub fn target_section(&self) -> Option<&TargetSection> {
+        self.target.as_ref()
+    }
+
+    /// The world `build.target` selects, for `target_world.world`.
+    pub fn world(&self) -> Option<&'static str> {
+        world_for_target(self.target()?)
     }
 
     /// `build.entry`, defaulted per the schema.
@@ -179,6 +266,10 @@ mod tests {
         std::fs::write(dir.join(MANIFEST_FILE), body).unwrap();
     }
 
+    /// The smallest manifest that validates. `[target]` is part of "minimal"
+    /// because the schema requires it — a project without one cannot be built
+    /// (ADR-0033), so a fixture without one would be testing a state that
+    /// cannot exist.
     const MINIMAL: &str = r#"
 [project]
 name = "hello-world"
@@ -186,6 +277,10 @@ version = "0.1.0"
 
 [build]
 target = "wasm32-cli"
+
+[target]
+host = "wasmtime_runner"
+version = "0.1.0"
 "#;
 
     #[test]
@@ -252,14 +347,95 @@ target = "wasm32-cli"
 
     #[test]
     fn accepts_both_component_model_spellings() {
+        // Spelled out rather than appended to MINIMAL: the key belongs under
+        // [build], and MINIMAL now ends with [target], so concatenation would
+        // silently file it in the wrong section and test nothing.
+        let with_spelling = |spelling: &str, value: bool| {
+            format!(
+                "[project]\nname = \"x\"\nversion = \"0.1.0\"\n\n\
+                 [build]\ntarget = \"wasm32-cli\"\n{spelling} = {value}\n\n\
+                 [target]\nhost = \"wasmtime_runner\"\nversion = \"0.1.0\"\n"
+            )
+        };
+
         let dir = tempfile::tempdir().unwrap();
-        write_manifest(dir.path(), &format!("{MINIMAL}component-model = true\n"));
+        write_manifest(dir.path(), &with_spelling("component-model", true));
         let m = Manifest::load(dir.path()).unwrap();
         assert_eq!(m.build.unwrap().component_model, Some(true));
 
-        write_manifest(dir.path(), &format!("{MINIMAL}component_model = false\n"));
+        write_manifest(dir.path(), &with_spelling("component_model", false));
         let m = Manifest::load(dir.path()).unwrap();
         assert_eq!(m.build.unwrap().component_model, Some(false));
+    }
+
+    #[test]
+    fn the_target_section_is_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), MINIMAL);
+        let m = Manifest::load(dir.path()).unwrap();
+        let target = m.target_section().unwrap();
+        assert_eq!(target.host, "wasmtime_runner");
+        assert_eq!(target.version, "0.1.0");
+        assert_eq!(target.wit_source, None);
+    }
+
+    #[test]
+    fn a_missing_target_section_is_an_error_not_a_default() {
+        // ADR-0033: no default host. Guessing would move the first confusing
+        // failure from this manifest line to instantiation time.
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path(),
+            "[project]\nname = \"x\"\nversion = \"0.1.0\"\n[build]\ntarget = \"wasm32-cli\"\n",
+        );
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert_eq!(err.code(), "CFG001");
+        assert!(err.to_string().contains("[target]"), "got {err}");
+        assert!(err.help().unwrap().contains("host"), "must say what to add");
+    }
+
+    #[test]
+    fn an_unknown_host_without_a_wit_source_is_rejected_early() {
+        // Caught at manifest load, so the message names clean.toml rather than
+        // a URL that was never going to resolve.
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path(),
+            "[project]\nname = \"x\"\nversion = \"0.1.0\"\n[build]\ntarget = \"wasm32-cli\"\n\
+             [target]\nhost = \"pixel-engine\"\nversion = \"0.1.0\"\n",
+        );
+        let err = Manifest::load(dir.path()).unwrap_err();
+        assert_eq!(err.code(), "CFG001");
+        assert!(err.help().unwrap().contains("wit_source"), "got {err:?}");
+    }
+
+    #[test]
+    fn a_third_party_host_with_a_wit_source_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path(),
+            "[project]\nname = \"x\"\nversion = \"0.1.0\"\n[build]\ntarget = \"wasm32-cli\"\n\
+             [target]\nhost = \"pixel-engine\"\nversion = \"0.1.0\"\n\
+             wit_source = \"https://example.test/host.wit\"\n",
+        );
+        let m = Manifest::load(dir.path()).unwrap();
+        assert_eq!(
+            m.target_section().unwrap().wit_source.as_deref(),
+            Some("https://example.test/host.wit")
+        );
+    }
+
+    #[test]
+    fn every_built_in_target_maps_to_a_world() {
+        // If this fails, a target reaches the request document with an empty
+        // world and the compiler checks against nothing.
+        for target in BUILT_IN_TARGETS {
+            assert!(
+                world_for_target(target).is_some(),
+                "no world mapped for built-in target {target}"
+            );
+        }
+        assert_eq!(world_for_target("wasm32-toaster"), None);
     }
 
     #[test]

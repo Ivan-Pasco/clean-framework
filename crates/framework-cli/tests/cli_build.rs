@@ -48,12 +48,21 @@ fn hello_world_project() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("clean.toml"),
-        "[project]\nname = \"hello-world\"\nversion = \"0.1.0\"\n\n[build]\ntarget = \"wasm32-cli\"\n",
+        "[project]\nname = \"hello-world\"\nversion = \"0.1.0\"\n\n[build]\ntarget = \"wasm32-cli\"\n\n[target]\nhost = \"wasmtime_runner\"\nversion = \"0.1.0\"\n",
     )
     .unwrap();
     std::fs::create_dir_all(dir.path().join("app")).unwrap();
     std::fs::write(dir.path().join("app/main.cln"), "start:\n\tprint(\"hello\")\n").unwrap();
     dir
+}
+
+/// The checked-in host contracts these tests build against.
+///
+/// A directory rather than the real `~/.cln/host-wit/`, so a test run neither
+/// reads the developer's cache nor writes to it — and so no test can pass by
+/// accident because a contract happened to be cached locally.
+fn host_wit_cache() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testing/fixtures/host-wit")
 }
 
 fn run_build(project: &Path, extra: &[&str]) -> Output {
@@ -62,6 +71,8 @@ fn run_build(project: &Path, extra: &[&str]) -> Output {
         .arg(project)
         .arg("--compiler")
         .arg(fake_compiler())
+        .arg("--host-wit-cache")
+        .arg(host_wit_cache())
         .args(extra)
         .output()
         .expect("could not run clean-framework")
@@ -112,6 +123,8 @@ fn a_compiler_rejection_exits_one_with_diagnostics() {
         .arg(project.path())
         .arg("--compiler")
         .arg(fake_compiler())
+        .arg("--host-wit-cache")
+        .arg(host_wit_cache())
         // Per-process env, so this cannot leak into a concurrent test the way
         // an in-process `set_var` would.
         .env("FAKE_COMPILER_FAIL", "1")
@@ -157,6 +170,8 @@ fn overrides_reach_the_request_document() {
         .arg(project.path())
         .arg("--compiler")
         .arg(fake_compiler())
+        .arg("--host-wit-cache")
+        .arg(host_wit_cache())
         .args(["--override", "build.optimization=debug"])
         .env("FAKE_COMPILER_ECHO_REQUEST", &echo)
         .output()

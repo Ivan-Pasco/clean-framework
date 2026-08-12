@@ -1,0 +1,29 @@
+// TEST FIXTURE — not a host declaration.
+//
+// The real `wasmtime_runner` contract is owned by Clean Manager and belongs at
+// the root of that repository (HCV-02, BVER-03: a host declares itself, and
+// there is exactly one declaration). Manager does not publish one yet, so this
+// file stands in for it in the framework's own tests and nowhere else.
+//
+// It is deliberately minimal: these tests exercise the framework's Moment 1
+// path — fetch, cache, hash, pin, world-select — not the contents of any
+// particular world. Nothing here should be treated as the CLI world's real
+// surface, and nothing in the framework may ever read this file at build time.
+//
+// Delete this the moment Manager publishes `wasmtime_runner`'s host.wit, and
+// point the fixture cache at the real file.
+
+package clean:host/cli@0.1.0;
+
+/// Standard output, the one thing a hello-world guest needs.
+interface console {
+    print: func(text: string);
+}
+
+/// The world `wasm32-cli` targets.
+world cli {
+    import console;
+
+    /// The guest's entry point, invoked once.
+    export start: func();
+}

@@ -41,6 +41,17 @@ fn parses_the_spec_example_without_loss() {
 
     assert_eq!(doc.telemetry.as_ref().unwrap().consent_level, "error-with-code");
 
+    // ADR-0033. All five fields, and the world named rather than extracted.
+    assert_eq!(doc.target_world.host, "clean-server");
+    assert_eq!(doc.target_world.version, "0.1.0");
+    assert_eq!(doc.target_world.world, "server");
+    assert_eq!(doc.target_world.sha256, "9f2b1c...");
+    assert!(
+        doc.target_world.wit.contains("world server"),
+        "the contract text must survive verbatim: {}",
+        doc.target_world.wit
+    );
+
     assert_eq!(doc.sources.len(), 2);
     assert_eq!(doc.sources[0].path, "app/main.cln");
     assert_eq!(doc.sources[0].content, "start()\n  console.print(\"hello\")\n");
@@ -85,6 +96,7 @@ fn emits_no_key_the_spec_does_not_name() {
         "dependencies",
         "compile_limits",
         "telemetry",
+        "target_world",
         "sources",
         "library_manifests",
         "overrides",

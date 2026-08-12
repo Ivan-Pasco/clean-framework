@@ -18,7 +18,10 @@ use framework_compiler_driver::artifact::CompileArtifact;
 use framework_compiler_driver::{Compiler, Diagnostic, RequestDocument};
 
 use crate::discover::{discover, DiscoveryPlan};
-use crate::errors::FrameworkError;
+use crate::errors::{FrameworkError, HostWitError};
+use crate::hostwit::{
+    self, HostContract, HostWitCache, Network, WitFetcher,
+};
 use crate::lower::{lower, ConfigOverride};
 use crate::manifest::Manifest;
 
@@ -34,16 +37,43 @@ pub struct BuildInputs {
     pub project_root: PathBuf,
     /// From `--override` flags and `CLN_*` env vars (FRM-BO-08).
     pub overrides: Vec<ConfigOverride>,
+    /// `--offline`: satisfy the host contract from cache or fail (C-18).
+    pub network: Network,
+    /// Where fetched host contracts live. Defaults to `~/.cln/host-wit/`;
+    /// overridden in tests so they never touch the real cache.
+    pub host_wit_cache: Option<HostWitCache>,
 }
 
 impl BuildInputs {
     pub fn new(project_root: impl Into<PathBuf>) -> Self {
-        BuildInputs { project_root: project_root.into(), overrides: Vec::new() }
+        BuildInputs {
+            project_root: project_root.into(),
+            overrides: Vec::new(),
+            network: Network::Allowed,
+            host_wit_cache: None,
+        }
     }
 
     pub fn with_overrides(mut self, overrides: Vec<ConfigOverride>) -> Self {
         self.overrides = overrides;
         self
+    }
+
+    pub fn offline(mut self, offline: bool) -> Self {
+        self.network = if offline { Network::Offline } else { Network::Allowed };
+        self
+    }
+
+    pub fn with_host_wit_cache(mut self, cache: HostWitCache) -> Self {
+        self.host_wit_cache = Some(cache);
+        self
+    }
+
+    fn cache(&self) -> Result<HostWitCache, FrameworkError> {
+        match &self.host_wit_cache {
+            Some(cache) => Ok(cache.clone()),
+            None => HostWitCache::user(),
+        }
     }
 }
 
@@ -67,16 +97,95 @@ pub struct BuildOutcome {
 /// build`, the determinism test suite, and (in Phase 7) the `cln dev` loop
 /// deciding whether anything actually changed.
 pub fn assemble_request(inputs: &BuildInputs) -> Result<RequestDocument, FrameworkError> {
+    assemble_request_with(inputs, default_fetcher().as_deref())
+}
+
+/// [`assemble_request`] with an injectable fetcher, for tests and for callers
+/// that supply their own transport.
+pub fn assemble_request_with(
+    inputs: &BuildInputs,
+    fetcher: Option<&dyn WitFetcher>,
+) -> Result<RequestDocument, FrameworkError> {
     // Step 2 — read the manifest first: it declares the excludes that step 1
     // needs.
     let manifest = Manifest::load(&inputs.project_root)?;
+
+    // Moment 1 — obtain the host contract before anything else that can fail
+    // slowly. A project targeting a host it cannot reach should learn that
+    // before walking the source tree.
+    let contract = resolve_target_world(inputs, &manifest, fetcher)?;
 
     // Step 1 — discover.
     let plan = DiscoveryPlan::m0(&inputs.project_root, manifest.excludes().to_vec());
     let sources = discover(&plan)?;
 
     // Steps 6 and 7 — lower and assemble.
-    Ok(lower(&manifest, sources, &inputs.overrides))
+    Ok(lower(&manifest, &contract, sources, &inputs.overrides))
+}
+
+/// Moment 1 (HCV-01): fetch or read the target's `host.wit`, verify it against
+/// the lockfile pin, check it declares the world this target needs, and pin it
+/// if it was not pinned before.
+///
+/// The world check is here rather than left to the compiler because the
+/// failure is far more legible at this level: one message naming the host and
+/// the world, instead of `COM012` on every single host-function call site.
+fn resolve_target_world(
+    inputs: &BuildInputs,
+    manifest: &Manifest,
+    fetcher: Option<&dyn WitFetcher>,
+) -> Result<HostContract, FrameworkError> {
+    let manifest_path = inputs.project_root.join(crate::manifest::MANIFEST_FILE);
+
+    // Both validated by `Manifest::validate`, so these are unreachable in
+    // practice — but they are cheap, and the alternative to an explicit error
+    // is an `unwrap` that becomes a panic the day validation changes.
+    let target = manifest.target_section().ok_or_else(|| HostWitError::MissingSection {
+        path: manifest_path.clone(),
+    })?;
+    let world = manifest.world().ok_or_else(|| HostWitError::NoWorldForTarget {
+        path: manifest_path,
+        target: manifest.target().unwrap_or_default().to_string(),
+    })?;
+
+    let cache = inputs.cache()?;
+    let pinned = hostwit::pinned_hash(&inputs.project_root, &target.host)?;
+
+    let contract = hostwit::resolve_contract(
+        &target.host,
+        &target.version,
+        target.wit_source.as_deref(),
+        &cache,
+        inputs.network,
+        fetcher,
+        pinned.as_deref(),
+    )?;
+
+    if !hostwit::declares_world(&contract.wit, world) {
+        return Err(HostWitError::WorldNotInContract {
+            host: contract.host.clone(),
+            version: contract.version.clone(),
+            world: world.to_string(),
+        }
+        .into());
+    }
+
+    // BVER-03: record the hash so every later build is reproducible against a
+    // pinned contract. Only when it was not already pinned — `resolve_contract`
+    // has already refused a mismatch, so reaching here with a pin means it
+    // matched and rewriting it would be a no-op write on every build.
+    if pinned.is_none() {
+        hostwit::pin_hash(&inputs.project_root, &contract)?;
+    }
+
+    Ok(contract)
+}
+
+/// The default transport. `None` until an HTTP client is wired in — a project
+/// whose contract is already cached still builds, and one that needs a fetch
+/// fails with `FRM004` naming what is missing rather than panicking.
+fn default_fetcher() -> Option<Box<dyn WitFetcher>> {
+    None
 }
 
 /// Run a full build. Steps 1–10 minus the dependency steps.

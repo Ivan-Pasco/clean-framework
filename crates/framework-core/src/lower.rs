@@ -14,9 +14,10 @@
 use std::collections::BTreeMap;
 
 use framework_compiler_driver::request::{
-    Build, Override, Project, RequestDocument, Source, SPEC_VERSION,
+    Build, Override, Project, RequestDocument, Source, TargetWorld, SPEC_VERSION,
 };
 
+use crate::hostwit::HostContract;
 use crate::manifest::Manifest;
 
 /// One overridden value, before it becomes an `overrides[]` entry.
@@ -65,8 +66,14 @@ impl ConfigOverride {
 ///
 /// `sources` must already be sorted (FRM-BO-06) — [`crate::discover`]
 /// guarantees that, and re-sorting here would hide a bug there.
+///
+/// `contract` is the host declaration fetched at Moment 1. It is a parameter
+/// rather than something this function obtains because §11.4.1 puts it beside
+/// the lowering, not in it: every other value here is a projection of
+/// `clean.toml`, and this one comes from a different source entirely.
 pub fn lower(
     manifest: &Manifest,
+    contract: &HostContract,
     sources: Vec<Source>,
     overrides: &[ConfigOverride],
 ) -> RequestDocument {
@@ -104,6 +111,22 @@ pub fn lower(
 
         compile_limits: None,
         telemetry: None,
+
+        // FRM-BO-16. The WIT goes across verbatim — no extraction of the
+        // selected world, no reformatting. `world` is the selector the
+        // compiler needs because a host.wit may declare several; resolving it
+        // compiler-side is what BVER-03 forbids.
+        //
+        // `world` is validated present by `Manifest::validate`, so the fallback
+        // is unreachable. An empty string would fail at the compiler with a
+        // clear `RQD002` rather than silently checking against nothing.
+        target_world: TargetWorld {
+            host: contract.host.clone(),
+            version: contract.version.clone(),
+            world: manifest.world().unwrap_or_default().to_string(),
+            sha256: contract.sha256.clone(),
+            wit: contract.wit.clone(),
+        },
 
         sources,
         library_manifests: Vec::new(),
@@ -158,6 +181,17 @@ mod tests {
         }]
     }
 
+    const CLI_WIT: &str = "package clean:host/cli@0.1.0;\nworld cli {}\n";
+
+    fn contract() -> HostContract {
+        HostContract {
+            host: "wasmtime_runner".into(),
+            version: "0.1.0".into(),
+            sha256: "9f2b1c".into(),
+            wit: CLI_WIT.into(),
+        }
+    }
+
     #[test]
     fn lowers_project_and_build_verbatim() {
         let m = manifest_from(
@@ -172,7 +206,7 @@ optimization = "release"
 strip = true
 "#,
         );
-        let doc = lower(&m, hello_sources(), &[]);
+        let doc = lower(&m, &contract(), hello_sources(), &[]);
         assert_eq!(doc.spec_version, "1");
         assert_eq!(doc.project.name, "hello-world");
         assert_eq!(doc.project.version, "0.1.0");
@@ -189,7 +223,7 @@ strip = true
         let m = manifest_from(
             "[project]\nname = \"x\"\nversion = \"0.1.0\"\n[build]\ntarget = \"wasm32-cli\"\n",
         );
-        let doc = lower(&m, hello_sources(), &[]);
+        let doc = lower(&m, &contract(), hello_sources(), &[]);
         assert_eq!(doc.build.optimization, None);
         assert_eq!(doc.build.strip, None);
         assert_eq!(doc.build.memory64, None);
@@ -209,7 +243,7 @@ target = "wasm32-cli"
 optimization = "release"
 "#,
         );
-        let doc = lower(&m, hello_sources(), &[ConfigOverride::cli("build.optimization", "debug")]);
+        let doc = lower(&m, &contract(), hello_sources(), &[ConfigOverride::cli("build.optimization", "debug")]);
 
         // The lowered config still says what clean.toml says.
         assert_eq!(doc.build.optimization.as_deref(), Some("release"));
@@ -237,7 +271,7 @@ target = "wasm32-server"
 data = "^3.1"
 "#,
         );
-        let doc = lower(&m, hello_sources(), &[]);
+        let doc = lower(&m, &contract(), hello_sources(), &[]);
         assert!(doc.dependencies.is_empty());
     }
 
@@ -249,6 +283,57 @@ data = "^3.1"
             _ => None,
         });
         assert_eq!(overrides, vec![ConfigOverride::env("build.optimization", "debug")]);
+    }
+
+    #[test]
+    fn target_world_carries_the_contract_verbatim_with_the_selected_world() {
+        // FRM-BO-16. The three things that must be true: the WIT is unmodified,
+        // the world comes from build.target's mapping, and the version/hash are
+        // the contract's resolved values rather than anything from clean.toml.
+        let m = manifest_from(
+            r#"
+[project]
+name = "x"
+version = "0.1.0"
+
+[build]
+target = "wasm32-cli"
+
+[target]
+host = "wasmtime_runner"
+version = "0.1.x"
+"#,
+        );
+        let doc = lower(&m, &contract(), hello_sources(), &[]);
+
+        assert_eq!(doc.target_world.wit, CLI_WIT, "the WIT must not be rewritten");
+        assert_eq!(doc.target_world.world, "cli");
+        assert_eq!(doc.target_world.host, "wasmtime_runner");
+        assert_eq!(doc.target_world.sha256, "9f2b1c");
+        // The manifest says "0.1.x"; the request must carry the resolved
+        // version, or two identical requests could mean different hosts.
+        assert_eq!(doc.target_world.version, "0.1.0");
+    }
+
+    #[test]
+    fn the_world_follows_build_target_not_the_host_name() {
+        // Same host contract, different build target, different world. This is
+        // the mapping the compiler is forbidden from doing itself (BVER-03).
+        let server = manifest_from(
+            "[project]\nname = \"x\"\nversion = \"0.1.0\"\n[build]\ntarget = \"wasm32-server\"\n[target]\nhost = \"clean-server\"\nversion = \"0.6.0\"\n",
+        );
+        assert_eq!(lower(&server, &contract(), hello_sources(), &[]).target_world.world, "server");
+
+        let browser = manifest_from(
+            "[project]\nname = \"x\"\nversion = \"0.1.0\"\n[build]\ntarget = \"wasm32-browser\"\n[target]\nhost = \"browser\"\nversion = \"0.1.0\"\n",
+        );
+        assert_eq!(lower(&browser, &contract(), hello_sources(), &[]).target_world.world, "browser");
+
+        // wasm64-server shares the server world with wasm32-server.
+        let w64 = manifest_from(
+            "[project]\nname = \"x\"\nversion = \"0.1.0\"\n[build]\ntarget = \"wasm64-server\"\n[target]\nhost = \"clean-server\"\nversion = \"0.6.0\"\n",
+        );
+        assert_eq!(lower(&w64, &contract(), hello_sources(), &[]).target_world.world, "server");
     }
 
     #[test]
@@ -266,7 +351,7 @@ target = "wasm32-server"
 "app/server/**" = ["server"]
 "#,
         );
-        let doc = lower(&m, hello_sources(), &[]);
+        let doc = lower(&m, &contract(), hello_sources(), &[]);
         assert_eq!(doc.folders.get("app/server/**").unwrap(), &vec!["server".to_string()]);
     }
 }

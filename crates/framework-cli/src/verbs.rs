@@ -48,10 +48,20 @@ struct BuildArgs {
     #[arg(long)]
     optimization: Option<String>,
 
+    /// Refuse network operations; satisfy the host contract from the local
+    /// cache or fail (C-18, CLI §6).
+    #[arg(long)]
+    offline: bool,
+
     /// Path to the compiler binary, bypassing the `.cln/version` pin.
     /// For tests and toolchain development — Manager never passes this.
     #[arg(long, hide = true)]
     compiler: Option<PathBuf>,
+
+    /// Host-contract cache directory, overriding `~/.cln/host-wit/`.
+    /// For tests — Manager never passes this.
+    #[arg(long, hide = true)]
+    host_wit_cache: Option<PathBuf>,
 }
 
 pub fn run<I, T>(args: I) -> ExitCode
@@ -86,7 +96,12 @@ fn run_build(args: BuildArgs) -> ExitCode {
         }
     };
 
-    let inputs = BuildInputs::new(&args.path).with_overrides(overrides);
+    let mut inputs = BuildInputs::new(&args.path)
+        .with_overrides(overrides)
+        .offline(args.offline);
+    if let Some(cache) = &args.host_wit_cache {
+        inputs = inputs.with_host_wit_cache(framework_core::HostWitCache::at(cache));
+    }
 
     let compiler = match resolve_compiler(&args, &inputs) {
         Ok(compiler) => compiler,
