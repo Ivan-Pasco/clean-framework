@@ -33,6 +33,8 @@
 //!   exercise the malformed-output path.
 //! - `FAKE_COMPILER_ECHO_REQUEST=<p>` — also write the received request to path
 //!   `<p>`, so a test can assert on exactly what crossed the seam.
+//! - `FAKE_COMPILER_WASM=<p>` — emit the component at `<p>` instead of a bare
+//!   preamble, so an end-to-end run can actually serve traffic from the guest.
 
 use std::io::{Read, Write};
 use std::process::ExitCode;
@@ -159,7 +161,24 @@ fn emit_artifact(request: &serde_json::Value, raw_request: &[u8]) -> std::io::Re
 
     // The WASM component preamble: magic + version 0x0d, layer 1. Enough to be
     // recognizably a component, which is all the framework ever inspects.
-    let wasm: Vec<u8> = vec![0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00];
+    //
+    // `FAKE_COMPILER_WASM` substitutes a real pre-compiled component instead.
+    // Framework tests never need one — nothing above the seam looks past the
+    // header — but an end-to-end run through Cloud does: the runtime actually
+    // instantiates the guest and serves from it, so a preamble alone would
+    // deploy and then fail health. Pointing this at a real component is what
+    // lets the whole pipeline be exercised before the compiler can produce
+    // one, and it keeps the substitution at the seam rather than letting any
+    // component grow a test mode.
+    let wasm: Vec<u8> = match std::env::var("FAKE_COMPILER_WASM") {
+        Ok(path) => std::fs::read(&path).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("FAKE_COMPILER_WASM={path} could not be read: {e}"),
+            )
+        })?,
+        Err(_) => vec![0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00],
+    };
 
     let mut diagnostics = Vec::new();
     if let Ok(message) = std::env::var("FAKE_COMPILER_WARN") {
