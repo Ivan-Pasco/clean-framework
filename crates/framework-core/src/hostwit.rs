@@ -30,6 +30,8 @@ use std::path::{Path, PathBuf};
 
 use framework_compiler_driver::artifact::hex_sha256;
 
+use cln_layout::Layout;
+
 use crate::errors::{FrameworkError, HostWitError};
 
 /// Cache root for fetched host contracts, relative to the user's home.
@@ -92,10 +94,18 @@ impl HostWitCache {
         HostWitCache { root: root.into() }
     }
 
-    /// The user-level cache under `~/.cln/host-wit/`.
+    /// The user-level cache under the toolchain root — `~/.cln/host-wit/`,
+    /// or `$CLN_HOME/host-wit/` when that is set.
+    ///
+    /// Resolved through `cln-layout` rather than from `HOME` directly, for the
+    /// same reason the compiler resolver does: every process that locates a
+    /// toolchain has to agree on where it is. Reading the environment here
+    /// meant a relocated build found its pinned compiler and then failed to
+    /// find the host contract beside it — the two answers came from different
+    /// code that had already drifted apart.
     pub fn user() -> Result<Self, FrameworkError> {
-        let home = home_dir().ok_or(HostWitError::NoHomeDirectory)?;
-        Ok(HostWitCache { root: home.join(CACHE_DIR) })
+        let layout = Layout::from_home().ok_or(HostWitError::NoHomeDirectory)?;
+        Ok(HostWitCache { root: layout.host_wit_dir() })
     }
 
     pub fn path_for(&self, host: &str, version: &str) -> PathBuf {
@@ -357,12 +367,6 @@ fn is_world_declaration(line: &str, world: &str) -> bool {
     name == world
 }
 
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from)
-}
 
 #[cfg(test)]
 mod tests {
