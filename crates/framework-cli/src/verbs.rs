@@ -32,6 +32,12 @@ struct Cli {
 enum Verb {
     /// Build a project into dist/app.wasm.
     Build(BuildArgs),
+
+    /// Wrap the built component into a distributable .clapp archive.
+    ///
+    /// Builds first when dist/ is missing or stale, so a caller never has to
+    /// sequence the two (FRM-BO-09a).
+    Package(BuildArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -84,15 +90,48 @@ where
 
     match cli.command {
         Verb::Build(args) => run_build(args),
+        Verb::Package(args) => run_package(args),
     }
 }
 
-fn run_build(args: BuildArgs) -> ExitCode {
-    let overrides = match collect_overrides(&args) {
+fn run_package(args: BuildArgs) -> ExitCode {
+    let (inputs, compiler) = match prepare(&args) {
+        Ok(prepared) => prepared,
+        Err(code) => return code,
+    };
+
+    match framework_core::package(&inputs, &compiler) {
+        Ok(outcome) => {
+            if outcome.rebuilt {
+                eprintln!("built (dist was stale)");
+            }
+            eprintln!("packaged {}", outcome.path.display());
+            let envelope = serde_json::json!({
+                "status": "ok",
+                "package": outcome.path,
+                "package_sha256": outcome.sha256,
+                "kind": outcome.kind.as_str(),
+                "rebuilt": outcome.rebuilt,
+                "framework_version": FRAMEWORK_VERSION,
+            });
+            println!("{envelope}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => report_failure(&e),
+    }
+}
+
+/// Shared setup for the verbs that need a project and a compiler.
+///
+/// Returns the exit code directly on failure because the two failure modes
+/// differ: a bad flag is exit 2 (invoked wrongly), everything else goes
+/// through the diagnostic envelope.
+fn prepare(args: &BuildArgs) -> Result<(BuildInputs, SubprocessCompiler), ExitCode> {
+    let overrides = match collect_overrides(args) {
         Ok(overrides) => overrides,
         Err(message) => {
             eprintln!("error: {message}");
-            return ExitCode::from(2);
+            return Err(ExitCode::from(2));
         }
     };
 
@@ -103,9 +142,16 @@ fn run_build(args: BuildArgs) -> ExitCode {
         inputs = inputs.with_host_wit_cache(framework_core::HostWitCache::at(cache));
     }
 
-    let compiler = match resolve_compiler(&args, &inputs) {
-        Ok(compiler) => compiler,
-        Err(e) => return report_failure(&e),
+    match resolve_compiler(args, &inputs) {
+        Ok(compiler) => Ok((inputs, compiler)),
+        Err(e) => Err(report_failure(&e)),
+    }
+}
+
+fn run_build(args: BuildArgs) -> ExitCode {
+    let (inputs, compiler) = match prepare(&args) {
+        Ok(prepared) => prepared,
+        Err(code) => return code,
     };
 
     match build(&inputs, &compiler) {
@@ -195,8 +241,9 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> BuildArgs {
+        // Both verbs take the same arguments, so either shape parses here.
         match Cli::try_parse_from(args).unwrap().command {
-            Verb::Build(a) => a,
+            Verb::Build(a) | Verb::Package(a) => a,
         }
     }
 

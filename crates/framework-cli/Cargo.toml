@@ -19,4 +19,8 @@ semver = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+# Integration tests read the produced .clapp back, as a consumer would.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+framework-package = { workspace = true }
+toml = { workspace = true }
 tempfile = { workspace = true }

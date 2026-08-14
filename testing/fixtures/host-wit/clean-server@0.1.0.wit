@@ -1,0 +1,39 @@
+// TEST FIXTURE — not a host declaration.
+//
+// The real `clean-server` contract is owned by that host and belongs at
+// `host.wit` in its repository (HCV-02, BVER-03: a host declares itself, and
+// there is exactly one declaration). This file stands in for it in the
+// framework's own tests and nowhere else.
+//
+// It exists because packaging is where the server world first matters: a
+// project targeting `wasm32-server` packages as a server bundle rather than an
+// application, and that branch cannot be tested without a contract declaring
+// the `server` world. Like the `clean-cli` fixture beside it, it is a strict
+// subset — these tests exercise the framework's Moment 1 path and the
+// packaging kind it selects, not the real surface of the server world.
+//
+// Delete this the moment clean-server publishes its host.wit, and point the
+// fixture cache at the real file.
+
+package clean:host@0.1.0;
+
+/// The minimum an HTTP guest needs to be a guest at all.
+interface routing {
+    record request {
+        method: string,
+        path: string,
+    }
+
+    record response {
+        status: u16,
+        body: string,
+    }
+}
+
+/// The world `wasm32-server` targets.
+world server {
+    use routing.{request, response};
+
+    /// One request in, one response out.
+    export handle: func(req: request) -> response;
+}

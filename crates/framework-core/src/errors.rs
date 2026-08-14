@@ -48,6 +48,9 @@ pub enum FrameworkError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error(transparent)]
+    Package(#[from] framework_package::PackageError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -192,6 +195,7 @@ impl FrameworkError {
             FrameworkError::HostWit(e) => e.code(),
             FrameworkError::Compiler(_) => "FRM001",
             FrameworkError::Output { .. } => "FRM002",
+            FrameworkError::Package(_) => "FRM003",
         }
     }
 
@@ -206,6 +210,14 @@ impl FrameworkError {
             FrameworkError::Output { .. } => {
                 Some("check that the project directory is writable".into())
             }
+            FrameworkError::Package(framework_package::PackageError::NotBuilt { .. }) => {
+                Some("run `cln build` first".into())
+            }
+            FrameworkError::Package(framework_package::PackageError::BridgeMissing {
+                backend,
+                ..
+            }) => Some(format!("install the backend with `cln add {backend}`")),
+            FrameworkError::Package(_) => None,
         }
     }
 

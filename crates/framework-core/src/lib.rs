@@ -26,8 +26,10 @@ pub mod errors;
 pub mod hostwit;
 pub mod lower;
 pub mod manifest;
+pub mod package;
 
 pub use build::{assemble_request, build, BuildInputs, BuildOutcome, APP_WASM, DIST_DIR};
+pub use package::{package, PackageOutcome};
 pub use errors::{DiscoveryError, FrameworkError, HostWitError, ManifestError};
 pub use hostwit::{HostContract, HostWitCache, Network, WitFetcher};
 pub use lower::{ConfigOverride, OverrideSource};
