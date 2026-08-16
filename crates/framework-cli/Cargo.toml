@@ -24,3 +24,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 framework-package = { workspace = true }
 toml = { workspace = true }
 tempfile = { workspace = true }
+sha2 = { workspace = true }
+# Proves the archived component would actually instantiate — the check the
+# runtime would otherwise be the first to perform, long after packaging.
+wasmparser = "0.252"
