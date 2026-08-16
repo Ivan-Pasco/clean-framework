@@ -71,7 +71,18 @@ pub fn package(
         // Bridges and migrations arrive with dependency resolution; a project
         // with no dependencies has neither, which is the whole of M0's scope.
         bridges: BTreeMap::new(),
-        host_toml: read_optional(&inputs.project_root.join(DIST_DIR).join("host.toml"))?,
+        // Regenerated for the archive rather than copied from `dist/`.
+        // `dist/host.toml` says `wasm = "app.wasm"` because it sits beside the
+        // component; inside the archive the config lives one level down in
+        // `config/`, and host-core resolves relative paths against the config
+        // file's own directory. Copying the dist copy would produce a bundle
+        // that parses cleanly and then fails at startup looking for
+        // `config/app.wasm`. Generation is total (FRM-BO-11), so regenerating
+        // is also what keeps a hand-edited `dist/host.toml` out of a shipped
+        // artifact.
+        host_toml: Some(
+            crate::hosttoml::generate(&manifest, crate::hosttoml::Placement::Archive).into_bytes(),
+        ),
         files: collect_assets(&inputs.project_root)?,
         build: pkg::Build {
             compiler_version: build_manifest
@@ -235,14 +246,6 @@ fn collect_into(
 
 fn read(path: &Path) -> Result<Vec<u8>, FrameworkError> {
     std::fs::read(path).map_err(|source| FrameworkError::Output { path: path.to_path_buf(), source })
-}
-
-fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, FrameworkError> {
-    if path.exists() {
-        read(path).map(Some)
-    } else {
-        Ok(None)
-    }
 }
 
 fn package_error(err: pkg::PackageError) -> FrameworkError {

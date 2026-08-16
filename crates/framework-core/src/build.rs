@@ -31,6 +31,9 @@ pub const DIST_DIR: &str = "dist";
 pub const APP_WASM: &str = "app.wasm";
 /// The build manifest, copied out of the compiler's artifact verbatim.
 pub const BUILD_MANIFEST: &str = "build-manifest.json";
+/// The generated host configuration (FRM-BO-11). Written beside `app.wasm`,
+/// which is what lets its `[guest] wasm` be a bare `app.wasm`.
+pub const HOST_TOML: &str = "host.toml";
 
 #[derive(Clone, Debug)]
 pub struct BuildInputs {
@@ -82,6 +85,9 @@ pub struct BuildOutcome {
     /// Where the framework wrote the component (FRM-BO-09).
     pub dist_wasm: PathBuf,
     pub build_manifest_path: PathBuf,
+    /// The generated `dist/host.toml` (FRM-BO-11) — what `cln run <project>`
+    /// passes to the host as `--config`.
+    pub dist_host_toml: PathBuf,
     /// Warnings and infos from a successful compile. Errors never reach here —
     /// they arrive as `Err(FrameworkError::Compiler)`.
     pub diagnostics: Vec<Diagnostic>,
@@ -198,12 +204,17 @@ pub fn build(inputs: &BuildInputs, compiler: &dyn Compiler) -> Result<BuildOutco
     // Step 8 — the single call across the seam.
     let artifact = compiler.compile(&request)?;
 
-    // Steps 9 and 10 — receive and write.
-    let paths = write_dist(&inputs.project_root, &artifact)?;
+    // Steps 9 and 10 — receive and write. The manifest is re-read rather than
+    // threaded out of `assemble_request`, which returns the lowered request
+    // document and not the manifest it was lowered from; a second parse of a
+    // small TOML file is cheaper than widening that return type for one caller.
+    let manifest = Manifest::load(&inputs.project_root)?;
+    let paths = write_dist(&inputs.project_root, &artifact, &manifest)?;
 
     Ok(BuildOutcome {
         dist_wasm: paths.wasm,
         build_manifest_path: paths.manifest,
+        dist_host_toml: paths.host_toml,
         diagnostics: artifact.diagnostics.clone(),
         request_sha256,
         wasm_sha256: artifact.wasm_sha256(),
@@ -213,6 +224,8 @@ pub fn build(inputs: &BuildInputs, compiler: &dyn Compiler) -> Result<BuildOutco
 struct DistPaths {
     wasm: PathBuf,
     manifest: PathBuf,
+    /// The generated `dist/host.toml` (FRM-BO-11).
+    host_toml: PathBuf,
 }
 
 /// Step 10, honouring FRM-BO-10.
@@ -220,7 +233,11 @@ struct DistPaths {
 /// Everything is staged in `dist.tmp-<pid>/` and swapped in at the end. A crash
 /// or a full disk mid-write leaves the previous `dist/` untouched rather than
 /// producing a `dist/` whose `app.wasm` and `build-manifest.json` disagree.
-fn write_dist(project_root: &Path, artifact: &CompileArtifact) -> Result<DistPaths, FrameworkError> {
+fn write_dist(
+    project_root: &Path,
+    artifact: &CompileArtifact,
+    manifest: &Manifest,
+) -> Result<DistPaths, FrameworkError> {
     let dist = project_root.join(DIST_DIR);
     let staging = project_root.join(format!("{DIST_DIR}.tmp-{}", std::process::id()));
 
@@ -240,6 +257,14 @@ fn write_dist(project_root: &Path, artifact: &CompileArtifact) -> Result<DistPat
         .to_pretty_json()
         .map_err(|e| FrameworkError::Compiler(e.into()))?;
     write_file(&staged_manifest, manifest_json.as_bytes())?;
+
+    // FRM-BO-11 — the host configuration, generated from project state alone
+    // and staged with everything else so a failed build leaves no partial
+    // config behind. `Placement::Dist` is what makes `[guest] wasm` resolve:
+    // this file lands beside the `app.wasm` written just above.
+    let staged_host_toml = staging.join(HOST_TOML);
+    let host_toml = crate::hosttoml::generate(manifest, crate::hosttoml::Placement::Dist);
+    write_file(&staged_host_toml, host_toml.as_bytes())?;
 
     // Swap. `rename` over an existing directory fails on every platform we
     // ship, so the old dist is moved aside first and only deleted once the new
@@ -270,7 +295,11 @@ fn write_dist(project_root: &Path, artifact: &CompileArtifact) -> Result<DistPat
         let _ = remove_dir(&previous);
     }
 
-    Ok(DistPaths { wasm: dist.join(APP_WASM), manifest: dist.join(BUILD_MANIFEST) })
+    Ok(DistPaths {
+        wasm: dist.join(APP_WASM),
+        manifest: dist.join(BUILD_MANIFEST),
+        host_toml: dist.join(HOST_TOML),
+    })
 }
 
 fn create_dir(path: &Path) -> Result<(), FrameworkError> {

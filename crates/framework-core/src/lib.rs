@@ -23,6 +23,7 @@
 pub mod build;
 pub mod discover;
 pub mod errors;
+pub mod hosttoml;
 pub mod hostwit;
 pub mod lower;
 pub mod manifest;
