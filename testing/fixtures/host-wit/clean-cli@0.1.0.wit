@@ -1,33 +1,57 @@
 // TEST FIXTURE — not a host declaration.
 //
-// The real `clean-cli` contract is owned by Clean Manager and belongs at
-// `hosts/clean-cli/host.wit` in that repository — the second form HCV-02
-// permits for a repo that contains hosts among other things (BVER-03: a host
-// declares itself, and there is exactly one declaration). Manager does not
-// publish one yet, so this file stands in for it in the framework's own tests
-// and nowhere else.
+// The real `clean-cli` contract lives at `host.wit` in the clean-cli
+// repository, which is the authoritative declaration under HCV-02. This file
+// is a copy of the parts of it the framework's tests exercise, kept here so
+// the suite does not depend on a sibling repository being checked out.
 //
-// It is deliberately minimal: these tests exercise the framework's Moment 1
-// path — fetch, cache, hash, pin, world-select — not the contents of any
-// particular world. The real contract declares both `cli` and `cli-default`;
-// this is a strict subset. Nothing here should be treated as the CLI world's
-// real surface, and nothing in the framework may ever read this file at build
-// time.
+// It is a strict subset in one respect only: the named-subcommand `cli` world
+// is declared here but not in clean-cli's host.wit, because that build does
+// not implement it. The framework still needs `world cli` to exist, because
+// `wasm32-cli` maps to the world name `cli` (Platform 07 §7.2) and the Moment 1
+// check refuses a target whose world the contract does not declare. The
+// distinction between the two CLI worlds is resolved by the guest's exports at
+// load time (CLIH-06/CLIH-20), not by the build target — see the note in
+// `framework-core`'s host configuration generator.
 //
-// Delete this the moment Manager publishes `clean-cli`'s host.wit, and point
-// the fixture cache at the real file.
+// Nothing in the framework may read this file at build time.
 
 package clean:host@0.1.0;
 
-/// Standard output, the one thing a hello-world guest needs.
-interface console {
-    print: func(text: string);
+/// Read-only access to the invoking process's environment (clean-cli §3.3).
+interface env {
+    /// Read an environment variable. None if unset.
+    get: func(name: string) -> option<string>;
+
+    /// All environment variables. Ordered as the host received them.
+    all: func() -> list<tuple<string, string>>;
+
+    /// Current working directory when clean-cli started.
+    cwd: func() -> string;
+
+    /// Whether stderr is a TTY (useful for color/spinner decisions).
+    stderr-is-tty: func() -> bool;
 }
 
-/// The world `wasm32-cli` targets.
-world cli {
-    import console;
+/// The default-handler world (clean-cli §2.2, schema/cli.wit.md).
+///
+/// The guest receives the raw argv and does its own parsing. Declared from the
+/// host's perspective, matching clean-cli's host.wit verbatim: `run` is an
+/// import *of the host*, which is an export *of the guest*.
+world cli-default {
+    export env;
 
-    /// The guest's entry point, invoked once.
-    export start: func();
+    /// Invoked with the raw argv (excluding the program name).
+    ///
+    /// Returns the process exit code (CLIH-11): 0 success, 1..=125
+    /// guest-defined.
+    import run: func(argv: list<string>, stdin-tty: bool) -> u8;
+}
+
+/// The named-subcommand world (clean-cli §2.1).
+///
+/// Declared so `wasm32-cli`'s world name resolves; clean-cli does not
+/// implement this mode, and a guest exporting `commands` is refused at load.
+world cli {
+    export env;
 }
