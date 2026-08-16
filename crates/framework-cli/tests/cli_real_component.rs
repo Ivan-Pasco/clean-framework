@@ -458,6 +458,13 @@ fn clean_runtime() -> Option<PathBuf> {
 /// Packaging twice must produce the same archive, hash included. The prebuilt
 /// component makes this worth asserting on real payload bytes rather than on a
 /// constant preamble that could never have varied.
+///
+/// This passes *because* `run()` sets `SOURCE_DATE_EPOCH`. Without it,
+/// `manifest.toml`'s `built_at` is wall-clock and the two archives differ in
+/// that one field — every other byte is already stable. Quote this test as
+/// "packaging is reproducible" only with the pin attached, or someone will
+/// compare two hashes months apart and go looking for a code change that never
+/// happened. See `framework_package::package` for why `built_at` stays.
 #[test]
 fn packaging_the_same_component_twice_is_byte_identical() {
     let first = hello_world_project();

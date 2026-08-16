@@ -123,6 +123,20 @@ fn staging_path(path: &Path) -> PathBuf {
 /// checked against a published artifact. The two things that would otherwise
 /// vary — entry order and entry timestamps — are pinned here and in
 /// [`archive::write`] respectively.
+///
+/// **With one caveat, and it is the one people trip over.** `manifest.toml`'s
+/// `built_at` is a wall-clock timestamp, so two packagings of identical inputs
+/// differ in exactly that field unless `SOURCE_DATE_EPOCH` is set. Every other
+/// byte — component, host config, entry order, ZIP timestamps — is already
+/// stable. `built_at` stays because Manager §00.14 requires it and it is the
+/// archive's only provenance; ZIP entry timestamps are pinned to the DOS epoch
+/// precisely so that provenance can live in one field instead of smeared
+/// across every entry (see [`archive::write`]).
+///
+/// So "byte-identical" is a claim that must carry its pin whenever it is made.
+/// The failure mode is someone comparing two hashes months apart, seeing a
+/// mismatch, and hunting for a code change that never happened. Set
+/// `SOURCE_DATE_EPOCH` before comparing; the tests that assert determinism do.
 pub fn package(inputs: PackageInputs) -> Result<Packaged, PackageError> {
     let mut entries: Vec<Entry> = Vec::new();
     let mut wasm_sha256: BTreeMap<String, String> = BTreeMap::new();
