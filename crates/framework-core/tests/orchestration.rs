@@ -1073,3 +1073,120 @@ fn a_cache_hit_survives_the_compiler_binary_disappearing() {
     let err = build(&project.inputs_cached(&cache), &copied).unwrap_err();
     assert_eq!(err.code(), "FRM001", "a vanished compiler cannot be keyed against");
 }
+
+// ---------------------------------------------------------------------------
+// `[folders]` as a discovery root — FRM-BO-03 item 1.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_folders_key_makes_its_subtree_compile() {
+    // The gap this closes: `[folders]` travelled to the compiler verbatim but
+    // never made the framework *look* there, so a project whose sources live
+    // outside `app/` built as if they did not exist.
+    let _env = FakeCompilerEnv::none();
+    let project = Project::hello();
+    project.write(
+        "clean.toml",
+        r#"
+[project]
+name = "hello-world"
+version = "0.1.0"
+
+[build]
+target = "wasm32-cli"
+
+[target]
+host = "clean-cli"
+version = "0.1.0"
+
+[folders]
+"services/**" = ["data"]
+"#,
+    );
+    project.write("services/billing/charge.cln", "charge:\n\tprint(\"x\")\n");
+
+    let request = assemble_request(&project.inputs()).unwrap();
+    let paths: Vec<&str> = request.sources.iter().map(|s| s.path.as_str()).collect();
+
+    assert_eq!(paths, ["app/main.cln", "services/billing/charge.cln"]);
+
+    // And the mapping still reaches the compiler unchanged.
+    assert_eq!(request.folders.get("services/**").unwrap(), &vec!["data".to_string()]);
+}
+
+#[test]
+fn a_folders_key_naming_a_missing_directory_is_not_an_error() {
+    // FRM-BO-03: absent roots are skipped silently. Declaring scope for a
+    // folder you have not created yet is ordinary.
+    let _env = FakeCompilerEnv::none();
+    let project = Project::hello();
+    project.write(
+        "clean.toml",
+        "[project]\nname = \"hello-world\"\nversion = \"0.1.0\"\n\
+         [build]\ntarget = \"wasm32-cli\"\n\
+         [target]\nhost = \"clean-cli\"\nversion = \"0.1.0\"\n\
+         [folders]\n\"not-yet/**\" = [\"data\"]\n",
+    );
+
+    let request = assemble_request(&project.inputs()).unwrap();
+    assert_eq!(request.sources.len(), 1, "app/main.cln only");
+}
+
+#[test]
+fn a_folders_key_overlapping_app_reads_each_file_once() {
+    // FRM-BO-03: overlapping roots are read once, first declaration wins.
+    let _env = FakeCompilerEnv::none();
+    let project = Project::hello();
+    project.write(
+        "clean.toml",
+        "[project]\nname = \"hello-world\"\nversion = \"0.1.0\"\n\
+         [build]\ntarget = \"wasm32-cli\"\n\
+         [target]\nhost = \"clean-cli\"\nversion = \"0.1.0\"\n\
+         [folders]\n\"app/**\" = [\"data\"]\n",
+    );
+
+    let request = assemble_request(&project.inputs()).unwrap();
+    assert_eq!(request.sources.len(), 1, "app/main.cln must not be read twice");
+}
+
+#[test]
+fn build_exclude_accepts_globs() {
+    // `[build].exclude` was prefix-only; a developer writing `**/*.test.cln`
+    // got silence. It shares the matcher `[folders]` needed.
+    let _env = FakeCompilerEnv::none();
+    let project = Project::hello();
+    project.write(
+        "clean.toml",
+        "[project]\nname = \"hello-world\"\nversion = \"0.1.0\"\n\
+         [build]\ntarget = \"wasm32-cli\"\nexclude = [\"**/*.test.cln\"]\n\
+         [target]\nhost = \"clean-cli\"\nversion = \"0.1.0\"\n",
+    );
+    project.write("app/model.cln", "model:\n\tprint(\"m\")\n");
+    project.write("app/model.test.cln", "test:\n\tprint(\"t\")\n");
+    project.write("app/deep/other.test.cln", "test:\n\tprint(\"t\")\n");
+
+    let request = assemble_request(&project.inputs()).unwrap();
+    let paths: Vec<&str> = request.sources.iter().map(|s| s.path.as_str()).collect();
+
+    assert_eq!(paths, ["app/main.cln", "app/model.cln"]);
+}
+
+#[test]
+fn excluding_a_folder_excludes_what_is_inside_it() {
+    // A developer excluding `app/scratch` means the folder. Requiring
+    // `app/scratch/**` to be taken seriously is a trap.
+    let _env = FakeCompilerEnv::none();
+    let project = Project::hello();
+    project.write(
+        "clean.toml",
+        "[project]\nname = \"hello-world\"\nversion = \"0.1.0\"\n\
+         [build]\ntarget = \"wasm32-cli\"\nexclude = [\"app/scratch\"]\n\
+         [target]\nhost = \"clean-cli\"\nversion = \"0.1.0\"\n",
+    );
+    project.write("app/scratch/wip.cln", "wip:\n\tprint(\"w\")\n");
+    project.write("app/scratch/deep/also.cln", "also:\n\tprint(\"a\")\n");
+
+    let request = assemble_request(&project.inputs()).unwrap();
+    let paths: Vec<&str> = request.sources.iter().map(|s| s.path.as_str()).collect();
+    assert_eq!(paths, ["app/main.cln"]);
+}

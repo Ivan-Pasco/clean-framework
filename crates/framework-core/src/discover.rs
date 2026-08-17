@@ -23,6 +23,7 @@ use framework_compiler_driver::artifact::hex_sha256;
 use framework_compiler_driver::request::Source;
 
 use crate::errors::{DiscoveryError, FrameworkError};
+use crate::glob::Glob;
 
 /// The compiler's own extension (FRM-BO-04). Plugins add patterns in Phase 4.
 pub const CLN_EXTENSION: &str = "cln";
@@ -38,19 +39,52 @@ pub struct DiscoveryPlan {
     pub roots: Vec<PathBuf>,
     /// Accepted file extensions, without the dot.
     pub extensions: Vec<String>,
-    /// Extra project-relative paths to skip, from `[build].exclude`.
-    pub excludes: Vec<String>,
+    /// Extra paths to skip, from `[build].exclude` (FRM-BO-05). Globs.
+    pub excludes: Vec<Glob>,
 }
 
 impl DiscoveryPlan {
-    /// The M0 plan: `app/` only, `.cln` only.
+    /// The base plan: `app/` only, `.cln` only.
     pub fn m0(project_root: impl Into<PathBuf>, excludes: Vec<String>) -> Self {
         DiscoveryPlan {
             project_root: project_root.into(),
             roots: vec![PathBuf::from("app")],
             extensions: vec![CLN_EXTENSION.to_string()],
-            excludes,
+            excludes: excludes.iter().map(|e| Glob::new(e)).collect(),
         }
+    }
+
+    /// Add the roots named by `[folders]` keys — root #1 of FRM-BO-03.
+    ///
+    /// `[folders]` maps a path glob to the libraries in scope for files under
+    /// it. That mapping is the compiler's business (it travels in the request
+    /// document verbatim), but it also *names folders the project compiles*,
+    /// which is discovery's business: a project whose only sources live under
+    /// a `[folders]` key must not build empty.
+    ///
+    /// Each pattern contributes its **literal prefix** as a walk root —
+    /// `app/server/**` walks `app/server`, `**/model.cln` walks the project
+    /// root. Walking the fixed part visits only the subtree that can match,
+    /// rather than the whole project, and the per-file exclude rules still
+    /// apply to everything found there.
+    ///
+    /// Roots come after `app/` for the same reason plugin roots do: FRM-BO-03
+    /// reads overlapping roots once, first declaration winning, and the
+    /// project's own source must not be shadowed.
+    pub fn with_folders<'a>(mut self, patterns: impl IntoIterator<Item = &'a str>) -> Self {
+        for pattern in patterns {
+            // An empty literal prefix means the pattern has no fixed part
+            // (`**/model.cln`), so the only honest root is the project itself.
+            // `PathBuf::new()` joins to the project root unchanged, and the
+            // exclude rules keep `dist/`, `target/` and dot-directories out of
+            // that walk exactly as they would anywhere else.
+            let root = PathBuf::from(Glob::new(pattern).literal_prefix());
+
+            if !self.roots.contains(&root) {
+                self.roots.push(root);
+            }
+        }
+        self
     }
 
     /// Add the roots and extensions the closure's plugins declare (§11.3
@@ -199,14 +233,14 @@ fn is_excluded_dir(name: &str) -> bool {
     name.starts_with('.') || EXCLUDED_DIRS.contains(&name)
 }
 
-/// `[build].exclude` entries. Matched as a path prefix or an exact match —
-/// glob support lands with `[folders]` in Phase 2, which needs a real glob
-/// matcher anyway.
-fn is_user_excluded(relative: &str, excludes: &[String]) -> bool {
-    excludes.iter().any(|exclude| {
-        let exclude = exclude.trim_end_matches('/');
-        relative == exclude || relative.starts_with(&format!("{exclude}/"))
-    })
+/// `[build].exclude` entries (FRM-BO-05).
+///
+/// Matched as globs, so `**/*.test.cln` and `app/scratch` both work. Excluding
+/// a directory excludes what is under it — `matches_prefix`, not `matches`:
+/// a developer who excludes `app/scratch` means the folder, and having to
+/// write `app/scratch/**` to be taken seriously is a trap.
+fn is_user_excluded(relative: &str, excludes: &[Glob]) -> bool {
+    excludes.iter().any(|exclude| exclude.matches_prefix(relative))
 }
 
 /// Does the file name end in one of the accepted extensions?
@@ -330,7 +364,7 @@ mod tests {
         assert_eq!(all.len(), 2, "gitignore must not affect discovery");
 
         let mut with_exclude = plan(dir.path());
-        with_exclude.excludes = vec!["app/scratch".into()];
+        with_exclude.excludes = vec![Glob::new("app/scratch")];
         let filtered = discover(&with_exclude).unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].path, "app/main.cln");

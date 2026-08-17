@@ -25,6 +25,7 @@ pub mod cache;
 pub mod closure;
 pub mod discover;
 pub mod errors;
+pub mod glob;
 pub mod hosttoml;
 pub mod hostwit;
 pub mod library;
@@ -45,6 +46,7 @@ pub use lockfile::{LockError, LockedPackage, Lockfile, PackageKind, PackageSourc
 pub use package::{package, PackageOutcome};
 pub use plugin::{LoadedPlugin, PluginError, PluginManifest};
 pub use resolver::{NoResolver, ResolveError, Resolver, SubprocessResolver};
+pub use glob::Glob;
 pub use errors::{DiscoveryError, FrameworkError, HostWitError, ManifestError};
 pub use hostwit::{HostContract, HostWitCache, Network, WitFetcher};
 pub use lower::{ConfigOverride, OverrideSource};
