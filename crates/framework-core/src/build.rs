@@ -14,6 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
+use cln_layout::Layout;
 use framework_compiler_driver::artifact::CompileArtifact;
 use framework_compiler_driver::{Compiler, Diagnostic, RequestDocument};
 
@@ -45,6 +46,10 @@ pub struct BuildInputs {
     /// Where fetched host contracts live. Defaults to `~/.cln/host-wit/`;
     /// overridden in tests so they never touch the real cache.
     pub host_wit_cache: Option<HostWitCache>,
+    /// The toolchain root used to resolve the active runtime when packaging
+    /// (FRM-BO-09a). Defaults to `~/.cln/`, or `$CLN_HOME` when set;
+    /// overridden in tests so they never read the developer's real install.
+    pub toolchain_layout: Option<Layout>,
 }
 
 impl BuildInputs {
@@ -54,7 +59,14 @@ impl BuildInputs {
             overrides: Vec::new(),
             network: Network::Allowed,
             host_wit_cache: None,
+            toolchain_layout: None,
         }
+    }
+
+    /// Resolve the active runtime from `root` instead of `~/.cln/`.
+    pub fn with_toolchain_layout(mut self, root: impl AsRef<Path>) -> Self {
+        self.toolchain_layout = Some(Layout::new(root.as_ref()));
+        self
     }
 
     pub fn with_overrides(mut self, overrides: Vec<ConfigOverride>) -> Self {

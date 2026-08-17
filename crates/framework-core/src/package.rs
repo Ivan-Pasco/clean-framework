@@ -14,6 +14,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use cln_layout::Layout;
+use cln_shared::ToolchainKind;
 use framework_compiler_driver::Compiler;
 use framework_package::{self as pkg, Kind, PackageInputs};
 
@@ -45,6 +47,13 @@ pub fn package(
 ) -> Result<PackageOutcome, FrameworkError> {
     let manifest = Manifest::load(&inputs.project_root)?;
     let rebuilt = ensure_built(inputs, compiler)?;
+
+    // Resolved through `cln-layout` for the same reason the host-wit cache and
+    // the compiler resolver are: every process that asks where the toolchain
+    // is has to get one answer. Tests inject their own root so they never read
+    // the developer's real `~/.cln` — and so the resolution tiers are testable
+    // at all, which reading `$HOME` directly would prevent.
+    let layout = inputs.toolchain_layout.clone().or_else(Layout::from_home);
 
     let wasm = read(&inputs.project_root.join(DIST_DIR).join(APP_WASM))?;
     let build_manifest = read_build_manifest(&inputs.project_root)?;
@@ -90,11 +99,11 @@ pub fn package(
                 .unwrap_or("unknown")
                 .to_string(),
             framework_version: crate::FRAMEWORK_VERSION.to_string(),
-            // The runtime pin the artifact must run against. Read from the
-            // project's pin rather than invented: `cln run` refuses on
-            // mismatch, and Cloud rejects a bundle whose runtime it cannot
-            // provide, so a wrong value here fails loudly at the far end.
-            runtime_version: runtime_pin(&inputs.project_root),
+            // The runtime the artifact must run against. Resolved, not
+            // invented: `cln run` refuses on mismatch and Cloud rejects a
+            // bundle whose runtime it cannot provide, so a wrong value here
+            // fails loudly at the far end.
+            runtime_version: runtime_pin(&inputs.project_root, layout.as_ref()),
             built_at: now_rfc3339(),
             built_by: format!("clean-framework {}", crate::FRAMEWORK_VERSION),
         },
@@ -190,16 +199,41 @@ fn format_rfc3339(secs: u64) -> String {
     format!("{year:04}-{month:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
-/// The runtime version this artifact is pinned to, from `.cln/runtime-version`
-/// (Manager §00.2). Absent means unpinned, which the manifest records as
-/// `"unknown"` rather than guessing a version the artifact was never tested
-/// against.
-fn runtime_pin(project_root: &Path) -> String {
+/// The runtime version this artifact is stamped with, resolved the way
+/// FRM-BO-09a specifies: the project pin if there is one, otherwise **the
+/// currently-active runtime resolved by Clean Manager**.
+///
+/// The two tiers are the top two of the `cln run` resolution chain (Manager
+/// §00.13), and they are here for the same reason they are there. A project
+/// that has pinned a runtime is asking to be built against that one. A project
+/// that has not is built against whatever `~/.cln/active/runtime` points at —
+/// which is not a guess, it is the runtime the toolchain would actually have
+/// used, and the one the developer's own `cln run` will select. Stamping it is
+/// how the artifact records what it was built against rather than leaving a
+/// consumer to assume.
+///
+/// Reading the pin file alone was wrong twice over: `cln pin` is not yet wired
+/// (Manager PLAN), so the file never exists and every artifact stamped
+/// `"unknown"` — and Cloud rejects `"unknown"` outright, because a runtime it
+/// cannot name is a runtime it cannot schedule. FRM-BO-09a says these fields
+/// take "no defaults"; `"unknown"` survives only for the case where there is
+/// genuinely nothing to read, and it is honest there.
+fn runtime_pin(project_root: &Path, layout: Option<&Layout>) -> String {
+    if let Some(pinned) = project_pin(project_root) {
+        return pinned;
+    }
+    layout
+        .and_then(|l| l.active_version(ToolchainKind::Runtime))
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// `.cln/runtime-version`, the project's own pin (Manager §00.2, §00.13 tier 2).
+fn project_pin(project_root: &Path) -> Option<String> {
     std::fs::read_to_string(project_root.join(".cln").join("runtime-version"))
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Static assets, read from `public/` into `assets/public/` in the archive.
@@ -250,6 +284,104 @@ fn read(path: &Path) -> Result<Vec<u8>, FrameworkError> {
 
 fn package_error(err: pkg::PackageError) -> FrameworkError {
     FrameworkError::Package(err)
+}
+
+#[cfg(test)]
+mod runtime_resolution {
+    use super::runtime_pin;
+    use cln_layout::Layout;
+    use cln_shared::ToolchainKind;
+    use tempfile::TempDir;
+
+    /// A toolchain root with `runtime` installed and made active, as
+    /// `cln install runtime` + `cln use runtime` would leave it.
+    fn toolchain_with_active_runtime(version: &str) -> (TempDir, Layout) {
+        let home = TempDir::new().unwrap();
+        let layout = Layout::new(home.path());
+        layout.ensure_base().unwrap();
+
+        let v: semver::Version = version.parse().unwrap();
+        std::fs::create_dir_all(layout.version_dir(ToolchainKind::Runtime, &v)).unwrap();
+        std::fs::write(layout.version_binary(ToolchainKind::Runtime, &v), b"stub").unwrap();
+        layout.set_active(ToolchainKind::Runtime, &v).unwrap();
+
+        (home, layout)
+    }
+
+    fn project_pinned_to(version: &str) -> TempDir {
+        let project = TempDir::new().unwrap();
+        std::fs::create_dir_all(project.path().join(".cln")).unwrap();
+        std::fs::write(
+            project.path().join(".cln").join("runtime-version"),
+            format!("{version}\n"),
+        )
+        .unwrap();
+        project
+    }
+
+    #[test]
+    fn an_unpinned_project_is_stamped_with_the_active_runtime() {
+        // The case that matters: no project pin, because `cln pin` is not yet
+        // wired. The artifact must still name a real runtime — Cloud schedules
+        // on this string, and cannot place a bundle that says "unknown".
+        let project = TempDir::new().unwrap();
+        let (_home, layout) = toolchain_with_active_runtime("0.7.0");
+
+        assert_eq!(runtime_pin(project.path(), Some(&layout)), "0.7.0");
+    }
+
+    #[test]
+    fn a_project_pin_outranks_the_active_runtime() {
+        // §00.13 orders these deliberately. A project that pinned a runtime is
+        // asking to be built against that one, even while a newer one is
+        // active — otherwise switching the global toolchain would silently
+        // restamp every artifact built from a pinned project.
+        let project = project_pinned_to("0.6.1");
+        let (_home, layout) = toolchain_with_active_runtime("0.7.0");
+
+        assert_eq!(runtime_pin(project.path(), Some(&layout)), "0.6.1");
+    }
+
+    #[test]
+    fn nothing_installed_and_nothing_pinned_stays_unknown() {
+        // The honest floor. With no pin and no active runtime there is no
+        // version to report, and inventing one would produce an artifact
+        // claiming a compatibility it was never built against. "unknown" is
+        // what makes Cloud's rejection correct rather than obstructive.
+        let project = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let layout = Layout::new(home.path());
+        layout.ensure_base().unwrap();
+
+        assert_eq!(runtime_pin(project.path(), Some(&layout)), "unknown");
+        assert_eq!(runtime_pin(project.path(), None), "unknown");
+    }
+
+    #[test]
+    fn a_blank_pin_file_falls_through_rather_than_stamping_empty() {
+        // A pin file truncated to nothing is absence, not a version. Treating
+        // it as a value would put `runtime_version = ""` in the manifest,
+        // which parses fine and then matches no node at all.
+        let project = TempDir::new().unwrap();
+        std::fs::create_dir_all(project.path().join(".cln")).unwrap();
+        std::fs::write(project.path().join(".cln").join("runtime-version"), "  \n").unwrap();
+        let (_home, layout) = toolchain_with_active_runtime("0.7.0");
+
+        assert_eq!(runtime_pin(project.path(), Some(&layout)), "0.7.0");
+    }
+
+    #[test]
+    fn a_dangling_active_link_does_not_become_a_version() {
+        // Uninstalling the active runtime leaves the symlink pointing nowhere.
+        // The stamp must not claim a runtime that is no longer installed.
+        let (home, layout) = toolchain_with_active_runtime("0.7.0");
+        let v: semver::Version = "0.7.0".parse().unwrap();
+        std::fs::remove_dir_all(layout.version_dir(ToolchainKind::Runtime, &v)).unwrap();
+        drop(home);
+
+        let project = TempDir::new().unwrap();
+        assert_eq!(runtime_pin(project.path(), Some(&layout)), "unknown");
+    }
 }
 
 #[cfg(test)]

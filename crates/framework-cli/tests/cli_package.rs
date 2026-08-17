@@ -58,7 +58,36 @@ fn server_project() -> tempfile::TempDir {
     dir
 }
 
+/// A toolchain root with a runtime installed and active, as the Manager's
+/// `cln install runtime` + `cln use runtime` would leave `~/.cln/`.
+///
+/// Built here rather than read from the developer's real `~/.cln` so the
+/// stamped runtime version is a fact of the test, not of the machine.
+fn toolchain_home(version: &str) -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    let versions = home.path().join("versions/runtime").join(version);
+    std::fs::create_dir_all(&versions).unwrap();
+    std::fs::write(versions.join("cln-runtime"), b"stub").unwrap();
+
+    let active = home.path().join("active");
+    std::fs::create_dir_all(&active).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&versions, active.join("runtime")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&versions, active.join("runtime")).unwrap();
+
+    home
+}
+
 fn run_package(project: &Path) -> Output {
+    run_package_with_runtime(project, &toolchain_home(RUNTIME_VERSION))
+}
+
+/// The runtime these tests install into their toolchain root. Any version
+/// works; this one matches what `cln available runtime` currently resolves.
+const RUNTIME_VERSION: &str = "0.7.0";
+
+fn run_package_with_runtime(project: &Path, home: &tempfile::TempDir) -> Output {
     Command::new(framework_binary())
         .arg("package")
         .arg(project)
@@ -70,6 +99,8 @@ fn run_package(project: &Path) -> Output {
         // the format promises rather than the wall clock. A build that does
         // not set this still records when it ran.
         .env("SOURCE_DATE_EPOCH", "1786708800")
+        // Resolve the active runtime from the test's own toolchain root.
+        .env("CLN_HOME", home.path())
         .output()
         .expect("could not run clean-framework")
 }
@@ -136,8 +167,17 @@ fn the_archive_describes_itself_to_a_consumer_that_only_has_the_bytes() {
     assert_eq!(manifest["package"]["version"].as_str(), Some("1.2.0"));
     assert_eq!(manifest["artifact"]["kind"].as_str(), Some("serve"));
     assert!(manifest["build"]["compiler_version"].is_str());
-    assert!(manifest["build"]["runtime_version"].is_str());
     assert!(manifest["spec_version"].is_str());
+
+    // The runtime the artifact was built against, resolved from the active
+    // toolchain (FRM-BO-09a). This is the field Cloud schedules on: it matches
+    // the bundle to a node that runs that runtime, and rejects the upload when
+    // no node does. A placeholder here is not a cosmetic wart — it makes the
+    // artifact undeployable, so the assertion is on the value, not the type.
+    assert_eq!(
+        manifest["build"]["runtime_version"].as_str(),
+        Some(RUNTIME_VERSION)
+    );
 
     // `SOURCE_DATE_EPOCH` is honoured, which is what makes the byte-identical
     // guarantee below reachable for a reproducible build.
@@ -244,4 +284,64 @@ fn static_assets_ride_along_in_the_archive() {
         read_from_archive(&archive, "assets/public/css/site.css").as_deref(),
         Some(&b"body{}"[..])
     );
+}
+
+#[test]
+fn the_runtime_stamp_is_independent_of_the_compiler_that_built_the_component() {
+    // The two provenance fields answer different questions, and the deploy
+    // path depends on them being separable. `compiler_version` says what
+    // produced the bytes; `runtime_version` says what the bytes need to run
+    // against, and only the second decides whether Cloud can schedule the
+    // bundle. A stand-in compiler therefore yields an artifact that is honest
+    // about its origin and still deployable — which is what lets the publish
+    // path be exercised end to end before the real compiler ships.
+    let project = server_project();
+    let output = run_package_with_runtime(project.path(), &toolchain_home("0.7.0"));
+    let archive = PathBuf::from(envelope(&output)["package"].as_str().unwrap());
+
+    let raw = read_from_archive(&archive, "manifest.toml").unwrap();
+    let manifest: toml::Value = toml::from_str(&String::from_utf8(raw).unwrap()).unwrap();
+    let build = &manifest["build"];
+
+    assert_eq!(build["runtime_version"].as_str(), Some("0.7.0"));
+    assert_ne!(
+        build["compiler_version"].as_str(),
+        build["runtime_version"].as_str(),
+        "the stand-in compiler's version must not leak into the runtime stamp"
+    );
+}
+
+#[test]
+fn a_toolchain_with_no_active_runtime_stamps_unknown_rather_than_guessing() {
+    // The gate exists for a reason, so it has to survive. With nothing
+    // installed there is no runtime to name, and a fabricated version would
+    // buy a successful upload and an artifact that cannot actually run.
+    // "unknown" is what makes Cloud's rejection the correct outcome.
+    let empty = tempfile::tempdir().unwrap();
+    let project = server_project();
+    let output = run_package_with_runtime(project.path(), &empty);
+    assert!(output.status.success(), "packaging still succeeds; it just cannot name a runtime");
+
+    let archive = PathBuf::from(envelope(&output)["package"].as_str().unwrap());
+    let raw = read_from_archive(&archive, "manifest.toml").unwrap();
+    let manifest: toml::Value = toml::from_str(&String::from_utf8(raw).unwrap()).unwrap();
+
+    assert_eq!(manifest["build"]["runtime_version"].as_str(), Some("unknown"));
+}
+
+#[test]
+fn a_project_pin_is_what_the_artifact_records() {
+    // §00.13 tier 2: a project pinned to a runtime is built against that one
+    // even while a different one is active, so switching the global toolchain
+    // cannot silently restamp a pinned project's artifacts.
+    let project = server_project();
+    std::fs::create_dir_all(project.path().join(".cln")).unwrap();
+    std::fs::write(project.path().join(".cln/runtime-version"), "0.6.1\n").unwrap();
+
+    let output = run_package_with_runtime(project.path(), &toolchain_home("0.7.0"));
+    let archive = PathBuf::from(envelope(&output)["package"].as_str().unwrap());
+    let raw = read_from_archive(&archive, "manifest.toml").unwrap();
+    let manifest: toml::Value = toml::from_str(&String::from_utf8(raw).unwrap()).unwrap();
+
+    assert_eq!(manifest["build"]["runtime_version"].as_str(), Some("0.6.1"));
 }

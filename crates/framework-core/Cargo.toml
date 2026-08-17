@@ -11,6 +11,7 @@ description = "Build orchestration for Clean Framework: discovery, lowering, req
 framework-compiler-driver = { workspace = true }
 framework-package = { workspace = true }
 cln-layout = { workspace = true }
+cln-shared = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 semver = { workspace = true }
