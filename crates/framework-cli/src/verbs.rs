@@ -68,6 +68,15 @@ struct BuildArgs {
     /// For tests — Manager never passes this.
     #[arg(long, hide = true)]
     host_wit_cache: Option<PathBuf>,
+
+    /// Compile every time and store nothing, ignoring the build cache (§11.7).
+    #[arg(long)]
+    no_cache: bool,
+
+    /// Build-cache directory, overriding `~/.cln/build-cache/`.
+    /// For tests — Manager never passes this.
+    #[arg(long, hide = true)]
+    build_cache: Option<PathBuf>,
 }
 
 pub fn run<I, T>(args: I) -> ExitCode
@@ -138,6 +147,14 @@ fn prepare(args: &BuildArgs) -> Result<(BuildInputs, SubprocessCompiler), ExitCo
     let mut inputs = BuildInputs::new(&args.path)
         .with_overrides(overrides)
         .offline(args.offline);
+    // `--no-cache` wins over an explicit directory: the flag says "do not
+    // reuse anything", and honouring a path alongside it would do the opposite.
+    if args.no_cache {
+        inputs = inputs.without_cache();
+    } else if let Some(cache) = &args.build_cache {
+        inputs = inputs.with_build_cache(framework_core::BuildCache::at(cache));
+    }
+
     if let Some(cache) = &args.host_wit_cache {
         inputs = inputs.with_host_wit_cache(framework_core::HostWitCache::at(cache));
     }

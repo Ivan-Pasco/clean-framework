@@ -36,6 +36,26 @@ pub trait Compiler {
     /// (FRM-BO-02, CMP-01).
     fn compile(&self, request: &RequestDocument) -> Result<CompileArtifact, CompileError>;
 
+    /// [`Compiler::compile`], also returning the response **exactly as it
+    /// arrived** — the undecoded tarball.
+    ///
+    /// This exists for the build cache (§11.7), which stores those raw bytes
+    /// rather than a re-serialized [`CompileArtifact`]. Re-serializing would
+    /// risk dropping anything the framework does not model (the build manifest
+    /// is deliberately opaque, §14.8); keeping the bytes means a cache hit
+    /// replays the same `from_tar` on the same input as a cache miss, so
+    /// CMP-06 holds by construction instead of by care.
+    ///
+    /// The default implementation returns an empty tarball alongside the
+    /// artifact, which a cache reads as "nothing worth storing". Wrappers and
+    /// test doubles that have no meaningful bytes need not implement it.
+    fn compile_capturing(
+        &self,
+        request: &RequestDocument,
+    ) -> Result<(CompileArtifact, Vec<u8>), CompileError> {
+        self.compile(request).map(|artifact| (artifact, Vec::new()))
+    }
+
     /// The compiler's self-reported version, for the build manifest.
     /// Read from `clean-compiler --version` per PLAN.md open question #2 —
     /// we never trust the version encoded in the install folder name.

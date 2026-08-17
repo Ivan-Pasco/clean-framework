@@ -27,4 +27,4 @@ tempfile = { workspace = true }
 sha2 = { workspace = true }
 # Proves the archived component would actually instantiate — the check the
 # runtime would otherwise be the first to perform, long after packaging.
-wasmparser = "0.252"
+wasmparser = { workspace = true }

@@ -76,6 +76,13 @@ impl SubprocessCompiler {
 
 impl Compiler for SubprocessCompiler {
     fn compile(&self, request: &RequestDocument) -> Result<CompileArtifact, CompileError> {
+        self.compile_capturing(request).map(|(artifact, _)| artifact)
+    }
+
+    fn compile_capturing(
+        &self,
+        request: &RequestDocument,
+    ) -> Result<(CompileArtifact, Vec<u8>), CompileError> {
         let payload = request.to_canonical_json()?;
 
         let mut child = Command::new(&self.binary)
@@ -113,7 +120,10 @@ impl Compiler for SubprocessCompiler {
             });
         }
 
-        CompileArtifact::from_tar(&output.stdout)
+        // The bytes go back alongside the parsed artifact so the build cache
+        // can store the response verbatim (§11.7).
+        let artifact = CompileArtifact::from_tar(&output.stdout)?;
+        Ok((artifact, output.stdout))
     }
 
     fn version(&self) -> Result<String, CompileError> {

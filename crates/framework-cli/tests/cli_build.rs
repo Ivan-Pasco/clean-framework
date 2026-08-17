@@ -73,6 +73,11 @@ fn run_build(project: &Path, extra: &[&str]) -> Output {
         .arg(fake_compiler())
         .arg("--host-wit-cache")
         .arg(host_wit_cache())
+        // Never the developer's real `~/.cln/build-cache/`. These tests steer
+        // the fake compiler through the environment while building the same
+        // project, so they share a request hash: a cached artifact from one
+        // would be served to another and the steering would do nothing.
+        .arg("--no-cache")
         .args(extra)
         .output()
         .expect("could not run clean-framework")
@@ -125,6 +130,7 @@ fn a_compiler_rejection_exits_one_with_diagnostics() {
         .arg(fake_compiler())
         .arg("--host-wit-cache")
         .arg(host_wit_cache())
+        .arg("--no-cache")
         // Per-process env, so this cannot leak into a concurrent test the way
         // an in-process `set_var` would.
         .env("FAKE_COMPILER_FAIL", "1")
@@ -172,6 +178,9 @@ fn overrides_reach_the_request_document() {
         .arg(fake_compiler())
         .arg("--host-wit-cache")
         .arg(host_wit_cache())
+        // This test observes what the compiler *received*, so it must actually
+        // run: a cache hit would skip it and never write the echo file.
+        .arg("--no-cache")
         .args(["--override", "build.optimization=debug"])
         .env("FAKE_COMPILER_ECHO_REQUEST", &echo)
         .output()

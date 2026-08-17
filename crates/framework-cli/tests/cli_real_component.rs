@@ -104,6 +104,12 @@ fn run(verb: &str, project: &Path) -> Output {
         .arg(fake_compiler())
         .arg("--host-wit-cache")
         .arg(host_wit_cache())
+        // Never the developer's real `~/.cln/build-cache/`. Beyond the usual
+        // isolation, these tests steer the fake compiler through the
+        // environment: a cached artifact from a run with different settings
+        // would be served here and the substitution below would silently do
+        // nothing.
+        .arg("--no-cache")
         // Hand the seam a real component instead of a preamble. This is the
         // single substitution these tests rest on, and it lives at the
         // subprocess boundary rather than inside any shipped code path.

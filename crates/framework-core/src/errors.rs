@@ -10,6 +10,8 @@
 //!
 //! - `CFG001` — schema violation in `clean.toml` (unknown/missing target,
 //!   missing `[target]` block, unresolvable host, world not in the contract).
+//! - `CFG002` — `.cln/lock.toml` is invalid, or does not describe a buildable
+//!   closure (missing `kind`, dangling edge, cycle, package not on disk).
 //! - `CFG003` — the manifest itself is missing or unparseable.
 //! - `CFG005` — a source file is not valid UTF-8 (TXT-02).
 //! - `FRM001` — the pinned compiler cannot be resolved or invoked.
@@ -51,6 +53,19 @@ pub enum FrameworkError {
 
     #[error(transparent)]
     Package(#[from] framework_package::PackageError),
+
+    /// Steps 3 and 4: the resolved closure could not be read. Boxed for the
+    /// same reason as `HostWit` — it carries the largest variants in the enum.
+    #[error(transparent)]
+    Closure(#[from] Box<crate::closure::ClosureError>),
+}
+
+/// Box on the way in, so call sites keep writing `?` against a bare
+/// `ClosureError` while `FrameworkError` stays small.
+impl From<crate::closure::ClosureError> for FrameworkError {
+    fn from(error: crate::closure::ClosureError) -> Self {
+        FrameworkError::Closure(Box::new(error))
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -196,6 +211,7 @@ impl FrameworkError {
             FrameworkError::Compiler(_) => "FRM001",
             FrameworkError::Output { .. } => "FRM002",
             FrameworkError::Package(_) => "FRM003",
+            FrameworkError::Closure(e) => e.code(),
         }
     }
 
@@ -218,6 +234,7 @@ impl FrameworkError {
                 ..
             }) => Some(format!("install the backend with `cln add {backend}`")),
             FrameworkError::Package(_) => None,
+            FrameworkError::Closure(e) => e.help(),
         }
     }
 

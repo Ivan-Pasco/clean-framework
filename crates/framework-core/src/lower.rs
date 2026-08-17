@@ -11,12 +11,11 @@
 //!   `overrides[]`. The compiler applies it and records it, so `cln repro
 //!   build` can replay the exact build.
 
-use std::collections::BTreeMap;
-
 use framework_compiler_driver::request::{
     Build, Override, Project, RequestDocument, Source, TargetWorld, SPEC_VERSION,
 };
 
+use crate::closure::ResolvedClosure;
 use crate::hostwit::HostContract;
 use crate::manifest::Manifest;
 
@@ -71,9 +70,17 @@ impl ConfigOverride {
 /// rather than something this function obtains because §11.4.1 puts it beside
 /// the lowering, not in it: every other value here is a projection of
 /// `clean.toml`, and this one comes from a different source entirely.
+///
+/// `closure` is the resolved dependency closure (steps 3 and 4), for the same
+/// reason: it is `.cln/lock.toml` plus each package's own manifest, not a
+/// projection of `clean.toml`. A project with no lockfile passes
+/// `&ResolvedClosure::default()` — an unresolved `[dependencies]` entry is
+/// never lowered as if it were resolved, because `resolved_from` would have no
+/// honest value.
 pub fn lower(
     manifest: &Manifest,
     contract: &HostContract,
+    closure: &ResolvedClosure,
     sources: Vec<Source>,
     overrides: &[ConfigOverride],
 ) -> RequestDocument {
@@ -103,11 +110,10 @@ pub fn lower(
 
         folders: manifest.folders.clone(),
 
-        // Populated in Phase 2 from `.cln/lock.toml`. An unresolved
-        // `[dependencies]` entry must not be lowered as if it were resolved —
-        // the request document's `resolved_from` field has no honest value
-        // before the lockfile is read.
-        dependencies: BTreeMap::new(),
+        // From `.cln/lock.toml`, never from `[dependencies]` in clean.toml:
+        // that section carries constraints ("^3.1"), and the request document
+        // needs resolved versions plus where each came from.
+        dependencies: closure.dependencies.clone(),
 
         compile_limits: None,
         telemetry: None,
@@ -129,7 +135,12 @@ pub fn lower(
         },
 
         sources,
-        library_manifests: Vec::new(),
+
+        // Already in dependency order, and already deduped, by the closure
+        // walk. Re-sorting here would discard that ordering; it is meaningful
+        // (a library follows what it builds on) and it is what keeps the
+        // request byte-identical across lockfile rewrites.
+        library_manifests: closure.libraries.clone(),
 
         overrides: overrides
             .iter()
@@ -206,7 +217,7 @@ optimization = "release"
 strip = true
 "#,
         );
-        let doc = lower(&m, &contract(), hello_sources(), &[]);
+        let doc = lower(&m, &contract(), &ResolvedClosure::default(), hello_sources(), &[]);
         assert_eq!(doc.spec_version, "1");
         assert_eq!(doc.project.name, "hello-world");
         assert_eq!(doc.project.version, "0.1.0");
@@ -223,7 +234,7 @@ strip = true
         let m = manifest_from(
             "[project]\nname = \"x\"\nversion = \"0.1.0\"\n[build]\ntarget = \"wasm32-cli\"\n",
         );
-        let doc = lower(&m, &contract(), hello_sources(), &[]);
+        let doc = lower(&m, &contract(), &ResolvedClosure::default(), hello_sources(), &[]);
         assert_eq!(doc.build.optimization, None);
         assert_eq!(doc.build.strip, None);
         assert_eq!(doc.build.memory64, None);
@@ -243,7 +254,7 @@ target = "wasm32-cli"
 optimization = "release"
 "#,
         );
-        let doc = lower(&m, &contract(), hello_sources(), &[ConfigOverride::cli("build.optimization", "debug")]);
+        let doc = lower(&m, &contract(), &ResolvedClosure::default(), hello_sources(), &[ConfigOverride::cli("build.optimization", "debug")]);
 
         // The lowered config still says what clean.toml says.
         assert_eq!(doc.build.optimization.as_deref(), Some("release"));
@@ -256,8 +267,9 @@ optimization = "release"
 
     #[test]
     fn unresolved_dependencies_are_not_lowered() {
-        // Lowering a dependency before the lockfile is read would force us to
-        // invent `resolved_from`, which has no honest value yet.
+        // `[dependencies]` in clean.toml carries *constraints*. Lowering one
+        // without the lockfile would force us to invent `resolved_from` and to
+        // pass "^3.1" where the compiler expects a resolved version.
         let m = manifest_from(
             r#"
 [project]
@@ -271,8 +283,66 @@ target = "wasm32-server"
 data = "^3.1"
 "#,
         );
-        let doc = lower(&m, &contract(), hello_sources(), &[]);
+        let doc = lower(&m, &contract(), &ResolvedClosure::default(), hello_sources(), &[]);
         assert!(doc.dependencies.is_empty());
+    }
+
+    #[test]
+    fn a_resolved_closure_reaches_the_request_document() {
+        use framework_compiler_driver::request::{Dependency, LibraryManifest};
+
+        let m = manifest_from(
+            "[project]\nname = \"x\"\nversion = \"0.1.0\"\n\
+             [build]\ntarget = \"wasm32-server\"\n[dependencies]\ndata = \"^3.1\"\n",
+        );
+
+        let mut closure = ResolvedClosure::default();
+        closure.dependencies.insert(
+            "frame.data".into(),
+            Dependency { version: "2.1.2".into(), resolved_from: "path".into() },
+        );
+        closure.libraries.push(LibraryManifest {
+            name: "frame.data".into(),
+            version: "2.1.2".into(),
+            wit: "interface data {}".into(),
+            handles_blocks: vec!["table".into()],
+            compiletime_wasm_sha256: None,
+        });
+
+        let doc = lower(&m, &contract(), &closure, hello_sources(), &[]);
+
+        // The resolved version wins over the "^3.1" constraint in clean.toml.
+        assert_eq!(doc.dependencies["frame.data"].version, "2.1.2");
+        assert_eq!(doc.dependencies["frame.data"].resolved_from, "path");
+        assert_eq!(doc.library_manifests.len(), 1);
+        assert_eq!(doc.library_manifests[0].handles_blocks, vec!["table"]);
+    }
+
+    #[test]
+    fn library_order_survives_lowering() {
+        use framework_compiler_driver::request::LibraryManifest;
+
+        // The closure walk put these in dependency order. Lowering must not
+        // re-sort them: `base` is a dependency of `app` and must precede it.
+        let entry = |name: &str| LibraryManifest {
+            name: name.into(),
+            version: "1.0.0".into(),
+            wit: String::new(),
+            handles_blocks: Vec::new(),
+            compiletime_wasm_sha256: None,
+        };
+
+        let m = manifest_from(
+            "[project]\nname = \"x\"\nversion = \"0.1.0\"\n[build]\ntarget = \"wasm32-cli\"\n",
+        );
+        let closure = ResolvedClosure {
+            libraries: vec![entry("base"), entry("app")],
+            ..Default::default()
+        };
+
+        let doc = lower(&m, &contract(), &closure, hello_sources(), &[]);
+        let names: Vec<&str> = doc.library_manifests.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, vec!["base", "app"], "dependency order must survive");
     }
 
     #[test]
@@ -304,7 +374,7 @@ host = "clean-cli"
 version = "0.1.x"
 "#,
         );
-        let doc = lower(&m, &contract(), hello_sources(), &[]);
+        let doc = lower(&m, &contract(), &ResolvedClosure::default(), hello_sources(), &[]);
 
         assert_eq!(doc.target_world.wit, CLI_WIT, "the WIT must not be rewritten");
         assert_eq!(doc.target_world.world, "cli");
@@ -322,18 +392,18 @@ version = "0.1.x"
         let server = manifest_from(
             "[project]\nname = \"x\"\nversion = \"0.1.0\"\n[build]\ntarget = \"wasm32-server\"\n[target]\nhost = \"clean-server\"\nversion = \"0.6.0\"\n",
         );
-        assert_eq!(lower(&server, &contract(), hello_sources(), &[]).target_world.world, "server");
+        assert_eq!(lower(&server, &contract(), &ResolvedClosure::default(), hello_sources(), &[]).target_world.world, "server");
 
         let browser = manifest_from(
             "[project]\nname = \"x\"\nversion = \"0.1.0\"\n[build]\ntarget = \"wasm32-browser\"\n[target]\nhost = \"clean-browser\"\nversion = \"0.1.0\"\n",
         );
-        assert_eq!(lower(&browser, &contract(), hello_sources(), &[]).target_world.world, "browser");
+        assert_eq!(lower(&browser, &contract(), &ResolvedClosure::default(), hello_sources(), &[]).target_world.world, "browser");
 
         // wasm64-server shares the server world with wasm32-server.
         let w64 = manifest_from(
             "[project]\nname = \"x\"\nversion = \"0.1.0\"\n[build]\ntarget = \"wasm64-server\"\n[target]\nhost = \"clean-server\"\nversion = \"0.6.0\"\n",
         );
-        assert_eq!(lower(&w64, &contract(), hello_sources(), &[]).target_world.world, "server");
+        assert_eq!(lower(&w64, &contract(), &ResolvedClosure::default(), hello_sources(), &[]).target_world.world, "server");
     }
 
     #[test]
@@ -351,7 +421,7 @@ target = "wasm32-server"
 "app/server/**" = ["server"]
 "#,
         );
-        let doc = lower(&m, &contract(), hello_sources(), &[]);
+        let doc = lower(&m, &contract(), &ResolvedClosure::default(), hello_sources(), &[]);
         assert_eq!(doc.folders.get("app/server/**").unwrap(), &vec!["server".to_string()]);
     }
 }

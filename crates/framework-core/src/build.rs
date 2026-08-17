@@ -1,10 +1,10 @@
-//! The build orchestrator — §11.2 steps 1, 2, 6, 7, 8, 9, 10.
+//! The build orchestrator — §11.2 steps 1, 2, 3, 4, 6, 7, 8, 9, 10.
 //!
-//! Steps 3 (resolve dependencies), 4 (read library manifests) and 5 (compile
-//! block handlers) are Phase 2/3 work and are absent, not stubbed: a project
-//! with `[dependencies]` builds today as if it had none, which is correct for
-//! M0's no-dependency scope and will become a hard error the moment the
-//! lockfile reader lands.
+//! Step 5 (compile block handlers) is Phase 3 work and is absent, not stubbed:
+//! a library declaring `handles block` reaches the compiler with its
+//! `compiletime_wasm_sha256` unset, which is honest — the framework has not
+//! compiled that handler. Filling it with anything would be a claim we cannot
+//! back.
 //!
 //! The one subtle rule here is **FRM-BO-10 — failure is total**. `dist/` is
 //! either fully replaced by a successful build or left exactly as the previous
@@ -18,6 +18,8 @@ use cln_layout::Layout;
 use framework_compiler_driver::artifact::CompileArtifact;
 use framework_compiler_driver::{Compiler, Diagnostic, RequestDocument};
 
+use crate::cache::{BuildCache, CachedCompiler};
+use crate::closure::{self, ResolvedClosure};
 use crate::discover::{discover, DiscoveryPlan};
 use crate::errors::{FrameworkError, HostWitError};
 use crate::hostwit::{
@@ -25,6 +27,7 @@ use crate::hostwit::{
 };
 use crate::lower::{lower, ConfigOverride};
 use crate::manifest::Manifest;
+use crate::resolver::{Resolver, SubprocessResolver};
 
 /// Output directory name, project-relative (FRM-BO-09).
 pub const DIST_DIR: &str = "dist";
@@ -35,6 +38,18 @@ pub const BUILD_MANIFEST: &str = "build-manifest.json";
 /// The generated host configuration (FRM-BO-11). Written beside `app.wasm`,
 /// which is what lets its `[guest] wasm` be a bare `app.wasm`.
 pub const HOST_TOML: &str = "host.toml";
+
+/// Where a build reads and writes cached artifacts (§11.7).
+#[derive(Clone, Debug, Default)]
+pub enum Caching {
+    /// `~/.cln/build-cache/`, resolved at build time.
+    #[default]
+    Default,
+    /// A specific cache — used by tests, and by any caller that keeps its own.
+    At(BuildCache),
+    /// `--no-cache`: always compile, store nothing.
+    Disabled,
+}
 
 #[derive(Clone, Debug)]
 pub struct BuildInputs {
@@ -50,6 +65,22 @@ pub struct BuildInputs {
     /// (FRM-BO-09a). Defaults to `~/.cln/`, or `$CLN_HOME` when set;
     /// overridden in tests so they never read the developer's real install.
     pub toolchain_layout: Option<Layout>,
+
+    /// Who to ask when `[dependencies]` are declared but `.cln/lock.toml` is
+    /// absent (§00.8). Defaults to spawning `cln fetch --internal`; swap in
+    /// [`crate::resolver::NoResolver`] for "build what is locked or fail".
+    ///
+    /// `Arc` rather than `Box` so `BuildInputs` stays `Clone` — `cln dev` will
+    /// clone it per rebuild.
+    pub resolver: std::sync::Arc<dyn Resolver + Send + Sync>,
+
+    /// Where compiled artifacts are cached (§11.7).
+    ///
+    /// [`Caching::Default`] resolves to `~/.cln/build-cache/` at build time.
+    /// Tests pass [`Caching::At`] so they never touch the developer's real
+    /// cache — and so none can pass by accident because an earlier run left
+    /// the right entry behind.
+    pub build_cache: Caching,
 }
 
 impl BuildInputs {
@@ -60,7 +91,43 @@ impl BuildInputs {
             network: Network::Allowed,
             host_wit_cache: None,
             toolchain_layout: None,
+            resolver: std::sync::Arc::new(SubprocessResolver::default()),
+            build_cache: Caching::Default,
         }
+    }
+
+    /// Cache compiled artifacts in `cache` instead of `~/.cln/build-cache/`.
+    pub fn with_build_cache(mut self, cache: BuildCache) -> Self {
+        self.build_cache = Caching::At(cache);
+        self
+    }
+
+    /// `--no-cache`: compile every time, and store nothing.
+    pub fn without_cache(mut self) -> Self {
+        self.build_cache = Caching::Disabled;
+        self
+    }
+
+    /// The build cache to use, or `None` when caching is off.
+    ///
+    /// A cache that cannot be located is not a build failure — the point of a
+    /// cache is to make a build faster, and a developer with no home directory
+    /// should still get a component.
+    fn resolved_build_cache(&self) -> Option<BuildCache> {
+        match &self.build_cache {
+            Caching::At(cache) => Some(cache.clone()),
+            Caching::Disabled => None,
+            Caching::Default => BuildCache::user().ok(),
+        }
+    }
+
+    /// Use `resolver` instead of spawning `cln fetch --internal`.
+    pub fn with_resolver(
+        mut self,
+        resolver: std::sync::Arc<dyn Resolver + Send + Sync>,
+    ) -> Self {
+        self.resolver = resolver;
+        self
     }
 
     /// Resolve the active runtime from `root` instead of `~/.cln/`.
@@ -133,12 +200,76 @@ pub fn assemble_request_with(
     // before walking the source tree.
     let contract = resolve_target_world(inputs, &manifest, fetcher)?;
 
-    // Step 1 — discover.
-    let plan = DiscoveryPlan::m0(&inputs.project_root, manifest.excludes().to_vec());
+    // Steps 3 and 4 — resolve the closure and read each package's manifest.
+    let closure = resolve_closure(inputs, &manifest)?;
+
+    // Step 1 — discover, with the roots and extensions the closure's plugins
+    // declare (FRM-BO-03 item 3, §11.4). This runs after step 3 because a
+    // plugin cannot extend discovery until it has been read and validated.
+    let plan = DiscoveryPlan::m0(&inputs.project_root, manifest.excludes().to_vec())
+        .with_plugins(&closure.plugins);
     let sources = discover(&plan)?;
 
     // Steps 6 and 7 — lower and assemble.
-    Ok(lower(&manifest, &contract, sources, &inputs.overrides))
+    Ok(lower(&manifest, &contract, &closure, sources, &inputs.overrides))
+}
+
+/// Steps 3 and 4: obtain the resolved closure.
+///
+/// **The framework does not resolve.** Manager owns resolution and writes
+/// `.cln/lock.toml`; when that file is absent, the framework asks Manager to
+/// produce it (`cln fetch --internal`, §00.8) rather than resolving itself.
+/// Two resolvers would eventually disagree, and the one that ran last would
+/// win silently.
+///
+/// A project with no `[dependencies]` is the common case and must not pay for
+/// a subprocess: there is nothing to resolve, so the callback is skipped.
+///
+/// **"Needs resolving" is decided by the closure, not by the file's
+/// existence.** Moment 1 has already run by the time this is called, and
+/// pinning the host contract (BVER-03) *creates* `.cln/lock.toml` to hold
+/// `[host.<name>]`. So on a first build the file always exists and contains no
+/// packages. Treating that as "already resolved" would skip the resolver on
+/// exactly the builds that need it, and the project would compile without its
+/// dependencies.
+fn resolve_closure(
+    inputs: &BuildInputs,
+    manifest: &Manifest,
+) -> Result<ResolvedClosure, FrameworkError> {
+    let existing = closure::resolve(&inputs.project_root)?;
+
+    // Declares nothing: whatever the lockfile holds, there is nothing to ask
+    // Manager for.
+    if manifest.dependencies.is_empty() {
+        return Ok(existing.unwrap_or_default());
+    }
+
+    // Declares dependencies and the lockfile accounts for them.
+    if let Some(closure) = existing {
+        if !closure.dependencies.is_empty() {
+            return Ok(closure);
+        }
+    }
+
+    // Declared dependencies with no lockfile: ask Manager to resolve, then
+    // read what it wrote. Building without them would silently compile a
+    // program whose imports cannot resolve.
+    inputs
+        .resolver
+        .resolve(&inputs.project_root)
+        .map_err(closure::ClosureError::from)?;
+
+    // The resolver reported success, so the lockfile must now account for the
+    // declared dependencies. An empty closure here means it did not — refusing
+    // names the real problem, where carrying on would surface it as a pile of
+    // unresolved imports with no mention of resolution at all.
+    match closure::resolve(&inputs.project_root)? {
+        Some(closure) if !closure.dependencies.is_empty() => Ok(closure),
+        _ => Err(closure::ClosureError::NotResolved {
+            project_root: inputs.project_root.clone(),
+        }
+        .into()),
+    }
 }
 
 /// Moment 1 (HCV-01): fetch or read the target's `host.wit`, verify it against
@@ -206,14 +337,26 @@ fn default_fetcher() -> Option<Box<dyn WitFetcher>> {
     None
 }
 
-/// Run a full build. Steps 1–10 minus the dependency steps.
+/// Run a full build. Steps 1–10, minus block-handler compilation (Phase 3).
 pub fn build(inputs: &BuildInputs, compiler: &dyn Compiler) -> Result<BuildOutcome, FrameworkError> {
     let request = assemble_request(inputs)?;
     let request_sha256 = request
         .sha256()
         .map_err(|e| FrameworkError::Compiler(e.into()))?;
 
-    // Step 8 — the single call across the seam.
+    // Step 8 — the single call across the seam, through the build cache
+    // (§11.7). A hit skips the compiler entirely; everything downstream is
+    // identical either way, because the cache replays the compiler's own
+    // response bytes.
+    let cached;
+    let compiler: &dyn Compiler = match inputs.resolved_build_cache() {
+        Some(cache) => {
+            cached = CachedCompiler::new(compiler, cache);
+            &cached
+        }
+        None => compiler,
+    };
+
     let artifact = compiler.compile(&request)?;
 
     // Steps 9 and 10 — receive and write. The manifest is re-read rather than

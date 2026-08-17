@@ -1,15 +1,15 @@
 //! File discovery — §11.3, rules FRM-BO-03 through FRM-BO-07.
 //!
-//! M0 scope: root #2 (`app/`) and `.cln` only. Roots #1 (`[folders]` keys) and
-//! #3 (plugin-declared `[paths].owns`) arrive with libraries and plugins in
-//! Phases 2 and 4; the walk below already takes a root list so those phases add
-//! entries rather than rewriting the walk.
+//! Roots #2 (`app/`) and #3 (plugin-declared `[paths].owns`, added by
+//! [`DiscoveryPlan::with_plugins`]). Root #1 (`[folders]` keys) still needs a
+//! glob matcher and is not wired up; the walk takes a root list, so it is an
+//! added entry rather than a rewrite.
 //!
 //! The rules this module is accountable for:
 //!
 //! - **FRM-BO-03** roots, in declared order, overlaps read once, missing roots
 //!   skipped silently.
-//! - **FRM-BO-04** extensions: only `.cln` in M0.
+//! - **FRM-BO-04** extensions: `.cln`, plus whatever patterns plugins declare.
 //! - **FRM-BO-05** excludes: dot-directories, `dist/`, `target/`,
 //!   `node_modules/`, `.build/` at any depth, plus `[build].exclude`.
 //!   `.gitignore` is deliberately not honoured.
@@ -51,6 +51,35 @@ impl DiscoveryPlan {
             extensions: vec![CLN_EXTENSION.to_string()],
             excludes,
         }
+    }
+
+    /// Add the roots and extensions the closure's plugins declare (§11.3
+    /// FRM-BO-03 item 3, §11.4).
+    ///
+    /// Plugin roots come **after** `app/` because FRM-BO-03 makes overlapping
+    /// roots read once with the first declaration winning: the project's own
+    /// source must not be shadowed by a dependency that claims the same
+    /// folder.
+    ///
+    /// Duplicates are dropped rather than refused. Two plugins owning `ui/`,
+    /// or one declaring an extension the compiler already handles, is
+    /// harmless — the walk reads each file once either way — and refusing it
+    /// would break a build over a coincidence between two dependencies the
+    /// developer does not control.
+    pub fn with_plugins(mut self, plugins: &[crate::plugin::LoadedPlugin]) -> Self {
+        for plugin in plugins {
+            for root in plugin.owned_roots() {
+                if !self.roots.contains(root) {
+                    self.roots.push(root.clone());
+                }
+            }
+            for pattern in plugin.patterns() {
+                if !self.extensions.contains(pattern) {
+                    self.extensions.push(pattern.clone());
+                }
+            }
+        }
+        self
     }
 }
 
@@ -180,11 +209,25 @@ fn is_user_excluded(relative: &str, excludes: &[String]) -> bool {
     })
 }
 
+/// Does the file name end in one of the accepted extensions?
+///
+/// Matches on the file name's suffix rather than `Path::extension`, because a
+/// plugin pattern may be multi-part: `Path::extension` on `button.ui.cln`
+/// returns `cln`, so a plugin declaring `ui.cln` would never match and its own
+/// files would be silently skipped.
+///
+/// The `.` before the suffix is required, so `cln` matches `main.cln` but not
+/// a file literally named `cln` — and `ui.cln` matches `button.ui.cln` but not
+/// `myui.cln`, which is a different name that merely ends the same way.
 fn matches_extension(path: &Path, extensions: &[String]) -> bool {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => extensions.iter().any(|wanted| wanted == ext),
-        None => false,
-    }
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+
+    extensions.iter().any(|wanted| {
+        let suffix = format!(".{wanted}");
+        name.len() > suffix.len() && name.ends_with(&suffix)
+    })
 }
 
 /// Project-relative POSIX form. `None` when the path escapes the root, which
@@ -350,5 +393,149 @@ mod tests {
             write(dir.path(), name, b"x\n");
         }
         assert_eq!(discover(&plan(dir.path())).unwrap(), discover(&plan(dir.path())).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod plugin_extension_tests {
+    use super::*;
+    use crate::plugin::{LoadedPlugin, PluginManifest, EMPTY_MODULE};
+
+    fn write(root: &Path, relative: &str, body: &[u8]) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// A loaded plugin declaring the given roots and patterns.
+    fn plugin(dir: &Path, name: &str, owns: &[&str], patterns: &[&str]) -> LoadedPlugin {
+        let root = dir.join("vendor").join(name);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let list = |items: &[&str]| -> String {
+            let quoted: Vec<String> = items.iter().map(|i| format!("\"{i}\"")).collect();
+            quoted.join(", ")
+        };
+
+        std::fs::write(
+            root.join("plugin.toml"),
+            format!(
+                "[plugin]\nname = \"{name}\"\nversion = \"1.0.0\"\n\
+                 [paths]\nowns = [{}]\npatterns = [{}]\n",
+                list(owns),
+                list(patterns)
+            ),
+        )
+        .unwrap();
+        std::fs::write(root.join("plugin.wasm"), EMPTY_MODULE).unwrap();
+
+        PluginManifest::load(&root).unwrap()
+    }
+
+    #[test]
+    fn a_plugin_owned_folder_becomes_a_discovery_root() {
+        // FRM-BO-03 item 3: a plugin can own `ui/` and have its files compiled.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "app/main.cln", b"start()\n");
+        write(dir.path(), "ui/button.cln", b"button()\n");
+
+        let plugins = [plugin(dir.path(), "frame.ui", &["ui"], &[])];
+        let plan = DiscoveryPlan::m0(dir.path(), Vec::new()).with_plugins(&plugins);
+
+        let paths: Vec<String> = discover(&plan).unwrap().into_iter().map(|s| s.path).collect();
+        assert_eq!(paths, ["app/main.cln", "ui/button.cln"]);
+    }
+
+    #[test]
+    fn a_multi_part_pattern_matches_the_files_it_names() {
+        // `Path::extension` on `button.ui.cln` returns `cln`, so matching on
+        // it alone would silently skip every file the plugin actually owns.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "app/main.cln", b"start()\n");
+        write(dir.path(), "app/button.ui.cln", b"button()\n");
+
+        let plugins = [plugin(dir.path(), "frame.ui", &[], &["ui.cln"])];
+        let plan = DiscoveryPlan::m0(dir.path(), Vec::new()).with_plugins(&plugins);
+
+        let paths: Vec<String> = discover(&plan).unwrap().into_iter().map(|s| s.path).collect();
+        assert!(paths.contains(&"app/button.ui.cln".to_string()), "got {paths:?}");
+    }
+
+    #[test]
+    fn a_pattern_matches_a_suffix_after_a_dot_not_a_bare_ending() {
+        // `ui.cln` names files like `button.ui.cln`. `myui.cln` merely ends
+        // the same way and belongs to nobody.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "app/button.ui.cln", b"a\n");
+        write(dir.path(), "app/myui.cln", b"b\n");
+
+        // Only the plugin's pattern, so `.cln` alone does not sweep both in.
+        let plugins = [plugin(dir.path(), "frame.ui", &[], &["ui.cln"])];
+        let mut plan = DiscoveryPlan::m0(dir.path(), Vec::new()).with_plugins(&plugins);
+        plan.extensions.retain(|e| e != CLN_EXTENSION);
+
+        let paths: Vec<String> = discover(&plan).unwrap().into_iter().map(|s| s.path).collect();
+        assert_eq!(paths, ["app/button.ui.cln"]);
+    }
+
+    #[test]
+    fn a_file_named_only_the_extension_is_not_a_source() {
+        // A file literally named `cln` has no name of its own.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "app/main.cln", b"start()\n");
+        write(dir.path(), "app/cln", b"not a source\n");
+
+        let paths: Vec<String> = discover(&DiscoveryPlan::m0(dir.path(), Vec::new()))
+            .unwrap()
+            .into_iter()
+            .map(|s| s.path)
+            .collect();
+        assert_eq!(paths, ["app/main.cln"]);
+    }
+
+    #[test]
+    fn the_projects_own_root_wins_over_a_plugin_claiming_it() {
+        // FRM-BO-03: overlapping roots are read once, first declaration wins.
+        // A dependency must not shadow the project's own source.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "app/main.cln", b"start()\n");
+
+        let plugins = [plugin(dir.path(), "frame.ui", &["app"], &[])];
+        let plan = DiscoveryPlan::m0(dir.path(), Vec::new()).with_plugins(&plugins);
+
+        assert_eq!(plan.roots, [PathBuf::from("app")], "app must appear once, first");
+        assert_eq!(discover(&plan).unwrap().len(), 1, "the file must be read once");
+    }
+
+    #[test]
+    fn two_plugins_claiming_the_same_folder_is_not_an_error() {
+        // The developer does not control whether two dependencies coincide,
+        // and the walk reads each file once either way.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "app/main.cln", b"start()\n");
+        write(dir.path(), "ui/button.cln", b"button()\n");
+
+        let plugins = [
+            plugin(dir.path(), "frame.ui", &["ui"], &["ui.cln"]),
+            plugin(dir.path(), "frame.widgets", &["ui"], &["ui.cln"]),
+        ];
+        let plan = DiscoveryPlan::m0(dir.path(), Vec::new()).with_plugins(&plugins);
+
+        assert_eq!(plan.roots, [PathBuf::from("app"), PathBuf::from("ui")]);
+        assert_eq!(plan.extensions, [CLN_EXTENSION.to_string(), "ui.cln".to_string()]);
+        assert_eq!(discover(&plan).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_plugin_owning_a_folder_that_does_not_exist_is_skipped_silently() {
+        // FRM-BO-03: missing roots are skipped. A plugin that owns `ui/` in a
+        // project that has no `ui/` yet is not an error.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "app/main.cln", b"start()\n");
+
+        let plugins = [plugin(dir.path(), "frame.ui", &["ui"], &[])];
+        let plan = DiscoveryPlan::m0(dir.path(), Vec::new()).with_plugins(&plugins);
+
+        assert_eq!(discover(&plan).unwrap().len(), 1);
     }
 }
