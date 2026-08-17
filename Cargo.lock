@@ -289,6 +289,7 @@ dependencies = [
  "framework-compiler-driver",
  "framework-core",
  "framework-package",
+ "framework-scaffold",
  "semver",
  "serde_json",
  "sha2",
@@ -344,6 +345,16 @@ dependencies = [
  "thiserror 1.0.69",
  "toml",
  "zip",
+]
+
+[[package]]
+name = "framework-scaffold"
+version = "0.1.4"
+dependencies = [
+ "semver",
+ "tempfile",
+ "thiserror 1.0.69",
+ "toml",
 ]
 
 [[package]]

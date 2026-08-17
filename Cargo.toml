@@ -4,6 +4,7 @@ members = [
     "crates/framework-core",
     "crates/framework-compiler-driver",
     "crates/framework-package",
+    "crates/framework-scaffold",
     "crates/framework-cli",
     "testing/fake-compiler",
 ]
@@ -19,6 +20,7 @@ repository = "https://github.com/Ivan-Pasco/clean-framework"
 framework-core = { path = "crates/framework-core" }
 framework-compiler-driver = { path = "crates/framework-compiler-driver" }
 framework-package = { path = "crates/framework-package" }
+framework-scaffold = { path = "crates/framework-scaffold" }
 
 # Published by clean-manager. Path deps while both repos are pre-1.0 and
 # developed side by side; these become git pins at M1 when manager stabilizes.

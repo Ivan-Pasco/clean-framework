@@ -213,3 +213,127 @@ fn version_flag_reports_the_crate_version() {
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains(env!("CARGO_PKG_VERSION")), "got: {text}");
 }
+
+// ---------------------------------------------------------------------------
+// `new`, `check`, `cache`.
+// ---------------------------------------------------------------------------
+
+fn run_verb(args: &[&str]) -> Output {
+    Command::new(framework_binary())
+        .args(args)
+        .output()
+        .expect("could not run clean-framework")
+}
+
+#[test]
+fn a_scaffolded_project_builds_with_no_edits() {
+    // The property that makes `new` worth having. If a generated project
+    // needs a fix before it compiles, the scaffold is a liability.
+    let parent = tempfile::tempdir().unwrap();
+    let project = parent.path().join("scaffolded");
+
+    let created = run_verb(&["new", project.to_str().unwrap()]);
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+
+    let built = run_build(&project, &[]);
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    assert_eq!(envelope(&built)["status"], "ok");
+    assert!(project.join("dist/app.wasm").is_file());
+}
+
+#[test]
+fn new_refuses_a_directory_that_already_has_content() {
+    // Merging would eventually overwrite somebody's clean.toml, and the damage
+    // would not surface until their next build.
+    let parent = tempfile::tempdir().unwrap();
+    let project = parent.path().join("occupied");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("clean.toml"), "[project]\nname = \"theirs\"\n").unwrap();
+
+    let output = run_verb(&["new", project.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(envelope(&output)["status"], "error");
+
+    // Their file survives untouched.
+    let kept = std::fs::read_to_string(project.join("clean.toml")).unwrap();
+    assert!(kept.contains("theirs"));
+}
+
+#[test]
+fn check_reports_success_without_writing_dist() {
+    // The whole point: answering "does this compile?" must not disturb a dist/
+    // that a dev server or a previous release may be using.
+    let project = hello_world_project();
+    let output = Command::new(framework_binary())
+        .arg("check")
+        .arg(project.path())
+        .arg("--compiler")
+        .arg(fake_compiler())
+        .arg("--host-wit-cache")
+        .arg(host_wit_cache())
+        .arg("--no-cache")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(envelope(&output)["status"], "ok");
+    assert!(
+        !project.path().join("dist").exists(),
+        "check must not write dist/"
+    );
+}
+
+#[test]
+fn check_fails_when_the_compiler_rejects_the_program() {
+    let project = hello_world_project();
+    let output = Command::new(framework_binary())
+        .arg("check")
+        .arg(project.path())
+        .arg("--compiler")
+        .arg(fake_compiler())
+        .arg("--host-wit-cache")
+        .arg(host_wit_cache())
+        .arg("--no-cache")
+        .env("FAKE_COMPILER_FAIL", "1")
+        .env("FAKE_COMPILER_DIAGNOSTIC", "unknown identifier `pritn`")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let envelope = envelope(&output);
+    assert_eq!(envelope["status"], "error");
+    assert_eq!(envelope["diagnostics"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn cache_status_and_clear_report_what_they_did() {
+    let cache = tempfile::tempdir().unwrap();
+    let cache_dir = cache.path().join("build-cache");
+    let project = hello_world_project();
+
+    // A build populates it.
+    let built = Command::new(framework_binary())
+        .arg("build")
+        .arg(project.path())
+        .arg("--compiler")
+        .arg(fake_compiler())
+        .arg("--host-wit-cache")
+        .arg(host_wit_cache())
+        .arg("--build-cache")
+        .arg(&cache_dir)
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+
+    let status = run_verb(&["cache", "status", "--build-cache", cache_dir.to_str().unwrap()]);
+    assert!(status.status.success());
+    assert_eq!(envelope(&status)["entries"], 1);
+
+    let cleared = run_verb(&["cache", "clear", "--build-cache", cache_dir.to_str().unwrap()]);
+    assert!(cleared.status.success());
+    assert_eq!(envelope(&cleared)["removed"], 1);
+
+    // Clearing an already-clear cache is not an error.
+    let again = run_verb(&["cache", "status", "--build-cache", cache_dir.to_str().unwrap()]);
+    assert_eq!(envelope(&again)["entries"], 0);
+}

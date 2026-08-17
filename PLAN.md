@@ -241,7 +241,7 @@ Two consequences worth knowing. **The cache stores the compiler's raw response t
 
 **Phase 7 — `cln dev` (§11.8 + hot-reload).** Watch mode. Warm compiler process. `notify`-based file watcher with 50ms debounce. On change: re-run discovery (steps 1–7), call `compile_incremental` (Platform 14 §14.14.3), swap the fresh `component.wasm` into a running dev host instance managed by `framework-dev::runtime_bridge`. Hot-swap protocol is owned by hosts/clean-server/01-server §1.9 — framework just calls its reload endpoint with the new bytes.
 
-**Phase 8 — Everything else that Manager dispatches to us.** `cln new`, `cln library create`, `cln library build`, `cln library publish`, `cln db migrate <verb>`, `cln mcp`. Each is a separate crate (§2) and lands independently. `cln api spec` / `cln api sdk` are owned by the server library per Manager §00.3.5, so framework just proxies the compile artifact to that library's tooling — small.
+**Phase 8 — Everything else that Manager dispatches to us.** `cln new` *(landed: `framework-scaffold`, app/server/library templates)*, `cln library create`, `cln library build`, `cln library publish`, `cln db migrate <verb>`, `cln mcp`. Each is a separate crate (§2) and lands independently. `cln api spec` / `cln api sdk` are owned by the server library per Manager §00.3.5, so framework just proxies the compile artifact to that library's tooling — small.
 
 ---
 
@@ -368,8 +368,8 @@ Deliverables:
 - Path + git dependency resolution (via the Manager callback). No registry.
 - Step 5 block-handler compilation + `~/.cln/wit-cache/`.
 - Plugin `.wasm` loading + `[paths].owns` extending discovery roots.
-- Build cache (`~/.cln/build-cache/`).
-- `cln check` (diagnostics-only build).
+- Build cache (`~/.cln/build-cache/`), plus `cln cache status|clear`. *Landed.*
+- `cln check` (diagnostics-only build). *Landed.*
 - Layer A + Layer B test suites; the `fake-compiler` in-tree.
 
 Explicit non-goals: `.clapp` packaging, dev mode, MCP.

@@ -16,6 +16,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use framework_compiler_driver::{Compiler, SubprocessCompiler};
 use framework_core::{build, BuildInputs, ConfigOverride, FrameworkError, FRAMEWORK_VERSION};
+use framework_scaffold::{scaffold, Template};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -38,6 +39,66 @@ enum Verb {
     /// Builds first when dist/ is missing or stale, so a caller never has to
     /// sequence the two (FRM-BO-09a).
     Package(BuildArgs),
+
+    /// Report diagnostics without writing dist/.
+    ///
+    /// Answers "does this compile?" without disturbing a dist/ that a running
+    /// dev server or a previous release may be using.
+    Check(BuildArgs),
+
+    /// Inspect or clear the build cache (§11.7).
+    Cache(CacheArgs),
+
+    /// Scaffold a new project.
+    New(NewArgs),
+}
+
+#[derive(Parser, Debug)]
+struct NewArgs {
+    /// Directory to create. Its name becomes the project name unless --name
+    /// is given.
+    path: PathBuf,
+
+    /// Project name, when it should differ from the directory name.
+    #[arg(long)]
+    name: Option<String>,
+
+    /// What to generate.
+    #[arg(long, default_value = "app", value_parser = clap::builder::PossibleValuesParser::new(Template::ALL))]
+    template: String,
+}
+
+#[derive(Parser, Debug)]
+struct CacheArgs {
+    #[command(subcommand)]
+    action: CacheAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum CacheAction {
+    /// Report where the cache lives, how many builds it holds, and its size.
+    Status(CacheScope),
+    /// Remove every cached build.
+    Clear(CacheScope),
+}
+
+/// Which cache to act on. Attached to each action rather than to `cache`
+/// itself so `cln cache status --build-cache <dir>` parses — clap only accepts
+/// a parent's options *before* the subcommand, and nobody writes them there.
+#[derive(Parser, Debug)]
+struct CacheScope {
+    /// Build-cache directory, overriding `~/.cln/build-cache/`.
+    /// For tests — Manager never passes this.
+    #[arg(long, hide = true)]
+    build_cache: Option<PathBuf>,
+}
+
+impl CacheAction {
+    fn scope(&self) -> &CacheScope {
+        match self {
+            CacheAction::Status(scope) | CacheAction::Clear(scope) => scope,
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -100,6 +161,164 @@ where
     match cli.command {
         Verb::Build(args) => run_build(args),
         Verb::Package(args) => run_package(args),
+        Verb::Check(args) => run_check(args),
+        Verb::Cache(args) => run_cache(args),
+        Verb::New(args) => run_new(args),
+    }
+}
+
+fn run_new(args: NewArgs) -> ExitCode {
+    // Validated by clap against `Template::ALL`, so an unknown value never
+    // reaches here — but an `expect` would turn a future flag-parsing change
+    // into a panic rather than a message.
+    let Some(template) = Template::parse(&args.template) else {
+        eprintln!("error: unknown template '{}'", args.template);
+        return ExitCode::from(2);
+    };
+
+    match scaffold(&args.path, template, args.name.as_deref()) {
+        Ok(outcome) => {
+            eprintln!(
+                "created {} ({}): {}",
+                outcome.root.display(),
+                outcome.template.as_str(),
+                outcome.files.join(", ")
+            );
+            let envelope = serde_json::json!({
+                "status": "ok",
+                "root": outcome.root,
+                "template": outcome.template.as_str(),
+                "files": outcome.files,
+                "framework_version": FRAMEWORK_VERSION,
+            });
+            println!("{envelope}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            let envelope = serde_json::json!({
+                "status": "error",
+                "diagnostics": [{
+                    "code": e.code(),
+                    "message": e.to_string(),
+                    "helps": e.help().into_iter().collect::<Vec<_>>(),
+                }],
+                "framework_version": FRAMEWORK_VERSION,
+            });
+            println!("{envelope}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_check(args: BuildArgs) -> ExitCode {
+    let (inputs, compiler) = match prepare(&args) {
+        Ok(prepared) => prepared,
+        Err(code) => return code,
+    };
+
+    match framework_core::check(&inputs, &compiler) {
+        Ok(outcome) => {
+            let warnings = outcome.diagnostics.len();
+            eprintln!(
+                "checked: no errors{}{}",
+                if warnings > 0 { format!(", {warnings} warning(s)") } else { String::new() },
+                if outcome.cached { " (cached)" } else { "" }
+            );
+            let envelope = serde_json::json!({
+                "status": "ok",
+                "request_sha256": outcome.request_sha256,
+                "diagnostics": outcome.diagnostics,
+                "cached": outcome.cached,
+                "framework_version": FRAMEWORK_VERSION,
+            });
+            println!("{envelope}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => report_failure(&e),
+    }
+}
+
+fn run_cache(args: CacheArgs) -> ExitCode {
+    let cache = match &args.action.scope().build_cache {
+        Some(dir) => framework_core::BuildCache::at(dir),
+        None => match framework_core::BuildCache::user() {
+            Ok(cache) => cache,
+            Err(e) => {
+                eprintln!("error: {e}");
+                let envelope = serde_json::json!({
+                    "status": "error",
+                    "diagnostics": [{
+                        "code": e.code(),
+                        "message": e.to_string(),
+                        "helps": e.help().into_iter().collect::<Vec<_>>(),
+                    }],
+                    "framework_version": FRAMEWORK_VERSION,
+                });
+                println!("{envelope}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+
+    let result = match args.action {
+        CacheAction::Status(_) => cache.keys().and_then(|keys| {
+            cache.size_bytes().map(|bytes| {
+                eprintln!(
+                    "{} cached build(s), {:.1} MB at {}",
+                    keys.len(),
+                    bytes as f64 / 1_048_576.0,
+                    cache.root().display()
+                );
+                serde_json::json!({
+                    "status": "ok",
+                    "action": "status",
+                    "root": cache.root(),
+                    "entries": keys.len(),
+                    "bytes": bytes,
+                    "framework_version": FRAMEWORK_VERSION,
+                })
+            })
+        }),
+
+        CacheAction::Clear(_) => {
+            // Counted before clearing: afterwards there is nothing to count,
+            // and "removed 0" would be indistinguishable from a no-op failure.
+            let before = cache.keys().map(|keys| keys.len());
+            before.and_then(|entries| {
+                cache.clear().map(|()| {
+                    eprintln!("cleared {entries} cached build(s)");
+                    serde_json::json!({
+                        "status": "ok",
+                        "action": "clear",
+                        "root": cache.root(),
+                        "removed": entries,
+                        "framework_version": FRAMEWORK_VERSION,
+                    })
+                })
+            })
+        }
+    };
+
+    match result {
+        Ok(envelope) => {
+            println!("{envelope}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            let envelope = serde_json::json!({
+                "status": "error",
+                "diagnostics": [{
+                    "code": e.code(),
+                    "message": e.to_string(),
+                    "helps": e.help().into_iter().collect::<Vec<_>>(),
+                }],
+                "framework_version": FRAMEWORK_VERSION,
+            });
+            println!("{envelope}");
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -258,9 +477,11 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> BuildArgs {
-        // Both verbs take the same arguments, so either shape parses here.
+        // build, package and check take the same arguments, so any of the
+        // three parses here. `cache` does not — it has its own shape.
         match Cli::try_parse_from(args).unwrap().command {
-            Verb::Build(a) | Verb::Package(a) => a,
+            Verb::Build(a) | Verb::Package(a) | Verb::Check(a) => a,
+            Verb::Cache(_) | Verb::New(_) => panic!("this verb does not take BuildArgs"),
         }
     }
 

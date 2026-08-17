@@ -1,0 +1,16 @@
+[package]
+name = "framework-scaffold"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Project scaffolding for Clean Framework: cln new, cln library create."
+
+[dependencies]
+semver = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+toml = { workspace = true }
