@@ -380,7 +380,7 @@ Deliverables:
 - `framework-package`: `.clapp`, `.serve`, `--raw`, `--standalone`.
 - `framework-dev`: full watch + hot-reload loop.
 - `framework-scaffold`: `cln new app`, `cln new library`, `cln new minimal`.
-- `framework-mcp`: the MCP server (§10) with the tool surface listed in §9.1 of the libraries spec.
+- `framework-mcp`: the MCP server (§10) with the tool surface listed in §9.1 of the libraries spec. Its main input is the `[mcp]` section plugins carry, which publishes the syntax they add so an assistant writing Clean knows what is legal in a project — see `system-documents/plugin-mcp-syntax.md`. That metadata already survives plugin loading intact (Phase 4 keeps unrecognized sections); Phase 8 adds the typed reader and the tool surface.
 - `framework-migrate`: `cln db migrate <verb>` dispatching to `~/.cln/db-drivers/`.
 - Determinism test suite for the framework's request-document output.
 - ADR-0006-equivalent for the framework: reference-stack ADR pinning `toml_edit`, `notify`, `zip`, `wasmtime`, `sha2`, etc.

@@ -591,6 +591,61 @@ mod tests {
     }
 
     #[test]
+    fn mcp_syntax_metadata_survives_loading_intact() {
+        // A plugin publishes the syntax it adds so `cln mcp` can tell an AI
+        // assistant what is legal in this project (see
+        // system-documents/plugin-mcp-syntax.md). The build ignores it
+        // entirely — but "ignores" must mean "carries through untouched", not
+        // "drops". Phase 8 reads this back; nothing else may flatten it first.
+        let plugin = Plugin::new(
+            &format!(
+                "{MINIMAL}\n\
+                 [mcp]\ndescription = \"Declarative UI blocks\"\n\n\
+                 [[mcp.syntax]]\nname = \"button\"\nkind = \"block\"\n\
+                 doc = \"A clickable button.\"\n\n\
+                 [[mcp.syntax.fields]]\nname = \"label\"\nrequired = true\n"
+            ),
+            EMPTY_MODULE,
+        );
+
+        let loaded = plugin.load().unwrap();
+        let mcp = loaded.manifest.extra.get("mcp").expect("[mcp] must be preserved");
+        assert_eq!(mcp.get("description").unwrap().as_str(), Some("Declarative UI blocks"));
+
+        // Nested arrays-of-tables are where a lossy parser would flatten or
+        // drop; this is the shape the real metadata takes.
+        let syntax = mcp.get("syntax").unwrap().as_array().unwrap();
+        assert_eq!(syntax.len(), 1);
+        assert_eq!(syntax[0].get("name").unwrap().as_str(), Some("button"));
+        assert_eq!(
+            syntax[0].get("fields").unwrap().as_array().unwrap()[0]
+                .get("name")
+                .unwrap()
+                .as_str(),
+            Some("label")
+        );
+    }
+
+    #[test]
+    fn mcp_metadata_does_not_change_what_the_build_produces() {
+        // FRM-MCP-01: two plugins differing only in their [mcp] section must
+        // be the same plugin as far as a build is concerned. If this hash
+        // moved, documentation edits would invalidate every dependent's build
+        // cache.
+        let bare = Plugin::new(MINIMAL, EMPTY_MODULE).load().unwrap();
+        let documented = Plugin::new(
+            &format!("{MINIMAL}\n[mcp]\ndescription = \"docs\"\n"),
+            EMPTY_MODULE,
+        )
+        .load()
+        .unwrap();
+
+        assert_eq!(bare.wasm_sha256, documented.wasm_sha256);
+        assert_eq!(bare.owned_roots(), documented.owned_roots());
+        assert_eq!(bare.patterns(), documented.patterns());
+    }
+
+    #[test]
     fn a_missing_plugin_toml_names_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let err = PluginManifest::load(dir.path()).unwrap_err();
