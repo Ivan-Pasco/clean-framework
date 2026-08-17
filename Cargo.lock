@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "fake-compiler"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde_json",
  "sha2",
@@ -283,7 +283,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "framework-cli"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "clap",
  "framework-compiler-driver",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "framework-compiler-driver"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "cln-layout",
  "cln-shared",
@@ -316,7 +316,7 @@ dependencies = [
 
 [[package]]
 name = "framework-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "cln-layout",
  "cln-shared",
@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "framework-package"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "framework-compiler-driver",
  "serde",
@@ -349,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "framework-scaffold"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "semver",
  "tempfile",

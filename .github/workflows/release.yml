@@ -138,9 +138,64 @@ jobs:
       - name: list assets
         run: ls -la dist
 
+      # Published with `gh` in a backoff loop rather than with
+      # softprops/action-gh-release, whose retry is 3 attempts about a second
+      # apart — under 4 seconds total. GitHub's release API returned 503 for
+      # longer than that twice in one afternoon (during v0.1.4 verification and
+      # again on the v0.1.5 release). Both times the build was fine and only
+      # publishing failed, which costs a manual re-run and teaches everyone to
+      # distrust a red release job.
+      #
+      # Backoff is 15s, 30s, 60s, 120s: long enough to outlast a transient
+      # outage, bounded at ~4 minutes so a real failure (bad token, missing
+      # asset) still surfaces quickly instead of hanging the job.
       - name: create github release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          fail_on_unmatched_files: true
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+
+          # Idempotent: a partially-succeeded earlier attempt (or a re-run of
+          # this job) must upload the assets rather than fail on "already
+          # exists".
+          publish() {
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+            else
+              gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" \
+                --title "$tag" --generate-notes
+            fi
+          }
+
+          for delay in 0 15 30 60 120; do
+            [ "$delay" -eq 0 ] || { echo "retrying in ${delay}s..."; sleep "$delay"; }
+            if publish; then
+              echo "published $tag"
+              exit 0
+            fi
+            echo "publish attempt failed"
+          done
+
+          echo "::error::could not publish $tag after 5 attempts"
+          exit 1
+
+      # The upload path above can succeed per-asset while leaving the release
+      # short of what was built, so the end state is asserted rather than
+      # inferred from the publish step's exit code. A green release job that
+      # published nothing is worse than a red one.
+      - name: verify the release carries every asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          expected=$(ls dist | wc -l | tr -d ' ')
+          actual=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets | length')
+
+          echo "$tag carries $actual of $expected expected asset(s)"
+          if [ "$actual" -ne "$expected" ]; then
+            echo "::error::release $tag has $actual assets, expected $expected"
+            exit 1
+          fi
