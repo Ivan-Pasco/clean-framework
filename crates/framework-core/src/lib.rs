@@ -37,7 +37,8 @@ pub mod plugin;
 pub mod resolver;
 
 pub use build::{
-    assemble_request, build, BuildInputs, BuildOutcome, Caching, APP_WASM, DIST_DIR,
+    assemble_request, build, check, BuildInputs, BuildOutcome, Caching, CheckOutcome, APP_WASM,
+    DIST_DIR,
 };
 pub use cache::{BuildCache, CacheError, CachedCompiler};
 pub use closure::{ClosureError, ResolvedClosure};

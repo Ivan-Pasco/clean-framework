@@ -207,6 +207,7 @@ pub fn assemble_request_with(
     // declare (FRM-BO-03 item 3, §11.4). This runs after step 3 because a
     // plugin cannot extend discovery until it has been read and validated.
     let plan = DiscoveryPlan::m0(&inputs.project_root, manifest.excludes().to_vec())
+        .with_folders(manifest.folders.keys().map(String::as_str))
         .with_plugins(&closure.plugins);
     let sources = discover(&plan)?;
 
@@ -373,6 +374,52 @@ pub fn build(inputs: &BuildInputs, compiler: &dyn Compiler) -> Result<BuildOutco
         diagnostics: artifact.diagnostics.clone(),
         request_sha256,
         wasm_sha256: artifact.wasm_sha256(),
+    })
+}
+
+/// What a diagnostics-only build found.
+#[derive(Clone, Debug)]
+pub struct CheckOutcome {
+    /// Warnings and infos. Errors arrive as `Err`, the same as for a build.
+    pub diagnostics: Vec<Diagnostic>,
+    pub request_sha256: String,
+    /// Whether the compiler was skipped because this exact build was cached.
+    pub cached: bool,
+}
+
+/// Compile and report, without writing anything to `dist/`.
+///
+/// The point is the *absence* of step 10: `cln check` answers "does this
+/// compile?" without disturbing a `dist/` that a running dev server or a
+/// previous release may be using. A check that overwrote the build output
+/// would make "just checking" a destructive act.
+///
+/// It is otherwise the same path as [`build`] — same discovery, same closure,
+/// same request document, same cache. Sharing that matters more than saving
+/// the compile: a check that consulted different inputs than the build could
+/// pass while the build fails, which is worse than no check at all.
+pub fn check(inputs: &BuildInputs, compiler: &dyn Compiler) -> Result<CheckOutcome, FrameworkError> {
+    let request = assemble_request(inputs)?;
+    let request_sha256 = request
+        .sha256()
+        .map_err(|e| FrameworkError::Compiler(e.into()))?;
+
+    let cached;
+    let (compiler, cache): (&dyn Compiler, Option<&CachedCompiler>) =
+        match inputs.resolved_build_cache() {
+            Some(cache) => {
+                cached = CachedCompiler::new(compiler, cache);
+                (&cached, Some(&cached))
+            }
+            None => (compiler, None),
+        };
+
+    let artifact = compiler.compile(&request)?;
+
+    Ok(CheckOutcome {
+        diagnostics: artifact.diagnostics.clone(),
+        request_sha256,
+        cached: cache.map(CachedCompiler::last_was_hit).unwrap_or(false),
     })
 }
 
