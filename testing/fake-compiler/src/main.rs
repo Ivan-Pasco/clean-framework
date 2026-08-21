@@ -8,8 +8,14 @@
 //! This binary implements exactly the contract in Platform 14 §14.2.2:
 //!
 //! ```text
-//!   fake-compiler compile --stdout-tar   < request.json  > artifact.tar
+//!   fake-compiler --request - --out <dir>   < request.json
 //!   fake-compiler --version
+//!
+//! The argv shape mirrors the real compiler (0.1.0), which takes an output
+//! directory rather than the `compile --stdout-tar` mode the framework
+//! originally assumed. A stand-in that accepted a protocol the real binary
+//! rejects is worse than no stand-in: every test would pass against a seam
+//! that cannot work.
 //! ```
 //!
 //! It validates the parts of the request the real compiler validates and that
@@ -36,7 +42,7 @@
 //! - `FAKE_COMPILER_WASM=<p>` — emit the component at `<p>` instead of a bare
 //!   preamble, so an end-to-end run can actually serve traffic from the guest.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::process::ExitCode;
 
 use sha2::{Digest, Sha256};
@@ -52,18 +58,20 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    if args.first().map(String::as_str) != Some("compile") {
-        eprintln!("fake-compiler: expected `compile`, got {args:?}");
+    // `--request -` means "read the request from stdin", the only mode the
+    // framework uses. Anything else is a caller that has drifted from the
+    // real compiler's interface, and saying so loudly is the point of this
+    // binary existing.
+    if flag_value(&args, "--request").as_deref() != Some("-") {
+        eprintln!("fake-compiler: expected `--request -`, got {args:?}");
         return ExitCode::from(2);
     }
 
-    if !args.iter().any(|a| a == "--stdout-tar") {
-        // The framework must pass this explicitly — Platform 14 §14.1.2 makes
-        // the tarball an opt-in mode of the process adapter. Failing loudly
-        // here is what keeps that contract honest.
-        eprintln!("fake-compiler: --stdout-tar is required");
+    let Some(out_dir) = flag_value(&args, "--out") else {
+        eprintln!("fake-compiler: --out <dir> is required");
         return ExitCode::from(2);
-    }
+    };
+    let out_dir = std::path::PathBuf::from(out_dir);
 
     let mut input = Vec::new();
     if let Err(e) = std::io::stdin().read_to_end(&mut input) {
@@ -80,25 +88,36 @@ fn main() -> ExitCode {
 
     let request: serde_json::Value = match serde_json::from_slice(&input) {
         Ok(value) => value,
-        Err(e) => return fail(1, "RQD002", &format!("request is not valid JSON: {e}")),
+        Err(e) => {
+            return fail_in(
+                Some(&out_dir),
+                1,
+                "RQD002",
+                &format!("request is not valid JSON: {e}"),
+            )
+        }
     };
 
     if let Err(message) = validate(&request) {
-        return fail(1, "RQD001", &message);
+        return fail_in(Some(&out_dir), 1, "RQD001", &message);
     }
 
     if let Ok(code) = std::env::var("FAKE_COMPILER_FAIL") {
         let code: u8 = code.parse().unwrap_or(1);
         let message = env_or("compilation failed".to_string(), "FAKE_COMPILER_DIAGNOSTIC");
-        return fail(code, "SEM001", &message);
+        return fail_in(Some(&out_dir), code, "SEM001", &message);
     }
 
     if std::env::var_os("FAKE_COMPILER_GARBAGE").is_some() {
-        let _ = std::io::stdout().write_all(b"this is not a tar archive");
+        // Exits 0 having written nothing usable. The framework must report a
+        // seam error rather than treating an empty output directory as a
+        // successful build.
+        let _ = std::fs::create_dir_all(&out_dir);
+        let _ = std::fs::write(out_dir.join("component.wasm"), b"this is not wasm");
         return ExitCode::SUCCESS;
     }
 
-    match emit_artifact(&request, &input) {
+    match emit_artifact(&request, &input, &out_dir) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("fake-compiler: could not write artifact: {e}");
@@ -156,7 +175,11 @@ fn validate(request: &serde_json::Value) -> Result<(), String> {
 
 /// Produce a plausible artifact: a valid empty WASM component preamble, a
 /// build manifest shaped per Platform 14 §14.8, and diagnostics.
-fn emit_artifact(request: &serde_json::Value, raw_request: &[u8]) -> std::io::Result<()> {
+fn emit_artifact(
+    request: &serde_json::Value,
+    raw_request: &[u8],
+    out_dir: &std::path::Path,
+) -> std::io::Result<()> {
     let version = env_or(String::from(DEFAULT_VERSION), "FAKE_COMPILER_VERSION");
 
     // The WASM component preamble: magic + version 0x0d, layer 1. Enough to be
@@ -219,42 +242,54 @@ fn emit_artifact(request: &serde_json::Value, raw_request: &[u8]) -> std::io::Re
         "timings": {},
     });
 
-    let mut builder = tar::Builder::new(Vec::new());
-    append(&mut builder, "component.wasm", &wasm)?;
-    append(&mut builder, "build-manifest.json", serde_json::to_string_pretty(&manifest)?.as_bytes())?;
-    append(&mut builder, "diagnostics.json", serde_json::to_string(&diagnostics)?.as_bytes())?;
-    // `finish()` writes the two zero blocks that terminate the archive.
-    // `into_inner()` alone yields a truncated tar that readers reject on the
-    // final entry.
-    builder.finish()?;
-    let tar = builder.into_inner()?;
-
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
-    handle.write_all(&tar)?;
-    handle.flush()
+    std::fs::create_dir_all(out_dir)?;
+    std::fs::write(out_dir.join("component.wasm"), &wasm)?;
+    std::fs::write(
+        out_dir.join("build-manifest.json"),
+        serde_json::to_string_pretty(&manifest)?,
+    )?;
+    std::fs::write(
+        out_dir.join("diagnostics.json"),
+        serde_json::to_string(&diagnostics)?,
+    )?;
+    Ok(())
 }
 
-fn append(builder: &mut tar::Builder<Vec<u8>>, name: &str, body: &[u8]) -> std::io::Result<()> {
-    let mut header = tar::Header::new_gnu();
-    header.set_size(body.len() as u64);
-    header.set_mode(0o644);
-    header.set_cksum();
-    builder.append_data(&mut header, name, body)
-}
-
-/// Emit diagnostics on stdout and exit non-zero, mirroring CMP-05: no partial
-/// artifact is written on failure.
-fn fail(code: u8, diagnostic_code: &str, message: &str) -> ExitCode {
+/// Emit diagnostics and exit non-zero, mirroring CMP-05: no partial artifact
+/// is written on failure.
+///
+/// The real compiler writes `diagnostics.json` into the output directory even
+/// when it rejects the program, and the framework reads it from there — so a
+/// stand-in that only printed to stdout would leave that path untested.
+fn fail_in(
+    out_dir: Option<&std::path::Path>,
+    code: u8,
+    diagnostic_code: &str,
+    message: &str,
+) -> ExitCode {
     let diagnostics = serde_json::json!([{
         "level": "error",
         "code": diagnostic_code,
         "message": message,
         "doc_url": format!("https://errors.cleanlanguage.dev/E/{diagnostic_code}"),
     }]);
+
+    if let Some(dir) = out_dir {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::write(dir.join("diagnostics.json"), diagnostics.to_string());
+    }
+
     println!("{diagnostics}");
     eprintln!("fake-compiler: {message}");
     ExitCode::from(code)
+}
+
+/// The value following `name` in argv, for `--flag value` pairs.
+fn flag_value(args: &[String], name: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 fn env_or(default: String, var: &str) -> String {

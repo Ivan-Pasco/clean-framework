@@ -3,19 +3,34 @@
 //! Protocol, one build per process:
 //!
 //! ```text
-//!   argv:   clean-compiler compile --stdout-tar
+//!   argv:   clean-compiler --request - --out <dir>
 //!   stdin:  the request document, as JSON (§14.1.1)
-//!   stdout: on success, one uncompressed tar (§14.1.2)
-//!   stderr: human-readable log; on failure, diagnostics JSON if the compiler
-//!           could produce any
+//!   <dir>:  on success, the artifact set — component.wasm,
+//!           build-manifest.json, diagnostics.json, and optionally
+//!           source-map.json
+//!   stderr: human-readable log
 //!   exit:   0 on success, non-zero on failure (CMP-05)
 //! ```
 //!
-//! `--stdout-tar` is passed explicitly. Platform 14 §14.1.2 makes the tarball
-//! an opt-in mode of the process adapter ("or to stdout as a single tarball
-//! (process adapter, with `--stdout-tar`)"), with a caller-specified output
-//! directory as the other mode. We choose stdout so a build never depends on a
-//! scratch directory existing and never leaves one behind on failure.
+//! **This shape was corrected against the real compiler (0.1.0).** It
+//! previously invoked `clean-compiler compile --stdout-tar`, reading the
+//! artifact set as a tarball on stdout — the mode Platform 14 §14.1.2
+//! describes as opt-in. The shipped compiler implements neither that
+//! subcommand nor that flag: it exits 2 with `unexpected argument 'compile'`,
+//! so every `cln build` against a real compiler failed at the seam. The
+//! output-directory mode is the one that exists, so it is the one we use.
+//!
+//! The directory is created under the system temp dir and removed on the way
+//! out, success or failure. That is the cost of this mode over stdout — a
+//! scratch directory has to exist — and it is paid here rather than pushed
+//! into the project, so a failed build still never writes inside `dist/`
+//! (FRM-BO-10).
+//!
+//! The artifact set is re-packed into an in-memory tarball before being
+//! returned. Everything downstream — `CompileArtifact::from_tar`, the build
+//! cache that stores the response verbatim (§11.7) — already speaks tar, and
+//! a cache entry must stay a self-contained blob rather than a directory that
+//! has since been deleted.
 //!
 //! Phase 7's warm-process mode (framed multi-request over one long-lived pipe)
 //! is a *different* file in this crate, not a change to this one. It needs a
@@ -85,9 +100,16 @@ impl Compiler for SubprocessCompiler {
     ) -> Result<(CompileArtifact, Vec<u8>), CompileError> {
         let payload = request.to_canonical_json()?;
 
+        // Scratch space for the artifact set, removed on the way out whatever
+        // happens. `OutDir` owns that guarantee via `Drop`, so an early return
+        // on a failed compile cannot leak a directory.
+        let out = OutDir::new()?;
+
         let mut child = Command::new(&self.binary)
-            .arg("compile")
-            .arg("--stdout-tar")
+            .arg("--request")
+            .arg("-")
+            .arg("--out")
+            .arg(out.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -113,17 +135,31 @@ impl Compiler for SubprocessCompiler {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+            // On a rejected program the compiler still writes
+            // `diagnostics.json` into the output directory — that file is the
+            // real message for the user, and it is far better than the exit
+            // code. Reading it before `out` is dropped is the only chance to
+            // get it.
+            let mut diagnostics = out.diagnostics();
+            if diagnostics.is_empty() {
+                diagnostics = diagnostics_from_failure(&output.stdout, &stderr);
+            }
+
             return Err(CompileError::CompilerFailed {
                 code: output.status.code().unwrap_or(-1),
-                diagnostics: diagnostics_from_failure(&output.stdout, &stderr),
+                diagnostics,
                 stderr,
             });
         }
 
-        // The bytes go back alongside the parsed artifact so the build cache
-        // can store the response verbatim (§11.7).
-        let artifact = CompileArtifact::from_tar(&output.stdout)?;
-        Ok((artifact, output.stdout))
+        // Re-pack into a tarball so everything downstream keeps its existing
+        // shape: `from_tar` parses it, and the build cache stores it verbatim
+        // as a self-contained blob rather than a directory we are about to
+        // delete (§11.7).
+        let tarball = out.to_tar()?;
+        let artifact = CompileArtifact::from_tar(&tarball)?;
+        Ok((artifact, tarball))
     }
 
     fn version(&self) -> Result<String, CompileError> {
@@ -147,6 +183,110 @@ impl Compiler for SubprocessCompiler {
                 "could not parse a version from `clean-compiler --version` output: {text:?}"
             ))
         })
+    }
+}
+
+/// The scratch directory the compiler writes its artifact set into.
+///
+/// Exists as a type rather than a few lines inline so the cleanup is a `Drop`
+/// impl: `compile_capturing` returns early on a rejected program, and a
+/// hand-rolled `remove_dir_all` at the end of the happy path would leak a
+/// directory on every failed build — which is most builds, during development.
+struct OutDir {
+    path: PathBuf,
+}
+
+impl OutDir {
+    fn new() -> Result<Self, CompileError> {
+        // Process id and a monotonic counter: two builds in one process (the
+        // determinism suite compiles the same project twice) must not share a
+        // directory, and neither must two concurrent `cln build` runs.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        let path = std::env::temp_dir().join(format!(
+            "cln-build-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+
+        // A directory left by a killed process would otherwise hand this build
+        // the previous one's `component.wasm`.
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path)?;
+
+        Ok(OutDir { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// `diagnostics.json` from a failed compile, if it is readable.
+    ///
+    /// Never an error: this runs while already reporting a failure, and a
+    /// missing or malformed diagnostics file must not replace the compiler's
+    /// real exit status with an I/O complaint.
+    fn diagnostics(&self) -> Vec<Diagnostics> {
+        std::fs::read(self.path.join(crate::artifact::DIAGNOSTICS_ENTRY))
+            .ok()
+            .and_then(|bytes| parse_diagnostics(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    /// Pack the artifact set into an uncompressed tarball.
+    ///
+    /// Entries are added in a fixed order rather than in `read_dir` order,
+    /// which is unspecified and varies by filesystem. The tarball is hashed
+    /// nowhere, but it *is* what the build cache stores, and a cache whose
+    /// stored bytes vary run-to-run for one compilation would be a puzzle to
+    /// debug later.
+    fn to_tar(&self) -> Result<Vec<u8>, CompileError> {
+        use crate::artifact::{
+            DIAGNOSTICS_ENTRY, MANIFEST_ENTRY, SOURCE_MAP_ENTRY, WASM_ENTRY,
+        };
+
+        let mut builder = tar::Builder::new(Vec::new());
+
+        for name in [WASM_ENTRY, MANIFEST_ENTRY, DIAGNOSTICS_ENTRY, SOURCE_MAP_ENTRY] {
+            let file = self.path.join(name);
+            let Ok(bytes) = std::fs::read(&file) else {
+                // Absent entries are normal: `source-map.json` is optional, and
+                // a diagnostics-only run writes no component. A *required*
+                // entry being missing is caught by `from_tar`, which reports it
+                // against the artifact contract rather than as a file-not-found.
+                continue;
+            };
+
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            // A fixed mtime: the tarball is the build cache's stored value, and
+            // baking the wall clock into it would make two identical
+            // compilations produce different cache contents.
+            header.set_mtime(0);
+            header.set_cksum();
+
+            builder
+                .append_data(&mut header, name, bytes.as_slice())
+                .map_err(|e| CompileError::MalformedOutput(format!(
+                    "could not pack {name} from the compiler's output: {e}"
+                )))?;
+        }
+
+        builder
+            .into_inner()
+            .map_err(|e| CompileError::MalformedOutput(format!(
+                "could not finish packing the compiler's output: {e}"
+            )))
+    }
+}
+
+impl Drop for OutDir {
+    fn drop(&mut self) {
+        // Best-effort: a build that succeeded must not fail because a temp
+        // directory could not be removed.
+        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
