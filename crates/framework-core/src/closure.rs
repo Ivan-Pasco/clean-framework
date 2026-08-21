@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use framework_compiler_driver::request::{Dependency, LibraryManifest as RequestLibrary};
 
+use crate::hostbridge::{HostBridgeError, HostInterface};
 use crate::library::{LibraryError, LibraryManifest};
 use crate::lockfile::{LockError, LockedPackage, Lockfile, PackageKind, PackageSource};
 use crate::plugin::{LoadedPlugin, PluginError, PluginManifest};
@@ -60,6 +61,11 @@ pub enum ClosureError {
 
     #[error(transparent)]
     Library(#[from] LibraryError),
+
+    /// A dependency's `host_bridge.cln` is unparseable, or declares an
+    /// interface that does not bind to this build's world (LIB012).
+    #[error(transparent)]
+    HostBridge(#[from] Box<HostBridgeError>),
 
     /// Boxed: `PluginError::ExportMissing` carries the full export list, and
     /// inlining it would grow every `Result` in the crate.
@@ -104,11 +110,20 @@ impl From<PluginError> for ClosureError {
     }
 }
 
+/// Boxed for the same reason as `PluginError`: the enum stays small while call
+/// sites keep writing `?` against a bare `HostBridgeError`.
+impl From<HostBridgeError> for ClosureError {
+    fn from(error: HostBridgeError) -> Self {
+        ClosureError::HostBridge(Box::new(error))
+    }
+}
+
 impl ClosureError {
     pub fn code(&self) -> &'static str {
         match self {
             ClosureError::Lock(e) => e.code(),
             ClosureError::Library(e) => e.code(),
+            ClosureError::HostBridge(e) => e.code(),
             // All of these mean the lockfile does not describe a buildable
             // closure — the same class of failure as a malformed lockfile.
             ClosureError::Missing { .. }
@@ -127,6 +142,7 @@ impl ClosureError {
         match self {
             ClosureError::Lock(e) => e.help(),
             ClosureError::Library(e) => e.help(),
+            ClosureError::HostBridge(e) => e.help(),
             ClosureError::Missing { .. } => {
                 Some("run `cln fetch` to re-materialize the dependency".into())
             }
@@ -157,16 +173,37 @@ impl ClosureError {
 /// yields an empty closure, which is a different thing: the project resolved,
 /// and resolved to nothing.
 pub fn resolve(project_root: &Path) -> Result<Option<ResolvedClosure>, ClosureError> {
+    resolve_for_world(project_root, None)
+}
+
+/// [`resolve`], told which world the component targets.
+///
+/// The world is what LIB012 is checked against, so a caller that knows it —
+/// every real build does — gets the check. `None` skips it, for callers that
+/// only want the closure read (`cln fetch`, tests of the walk itself).
+pub fn resolve_for_world(
+    project_root: &Path,
+    target_world: Option<&str>,
+) -> Result<Option<ResolvedClosure>, ClosureError> {
     let Some(lockfile) = Lockfile::load(project_root)? else {
         return Ok(None);
     };
-    read_closure(project_root, &lockfile).map(Some)
+    read_closure_for_world(project_root, &lockfile, target_world).map(Some)
 }
 
 /// Read every package in `lockfile` from disk and project it.
 pub fn read_closure(
     project_root: &Path,
     lockfile: &Lockfile,
+) -> Result<ResolvedClosure, ClosureError> {
+    read_closure_for_world(project_root, lockfile, None)
+}
+
+/// [`read_closure`], told which world the component targets (LIB012).
+pub fn read_closure_for_world(
+    project_root: &Path,
+    lockfile: &Lockfile,
+    target_world: Option<&str>,
 ) -> Result<ResolvedClosure, ClosureError> {
     let order = walk_order(lockfile)?;
 
@@ -189,7 +226,53 @@ pub fn read_closure(
             PackageKind::Library => {
                 let root = package_root(project_root, package)?;
                 let manifest = LibraryManifest::load(&root)?;
-                closure.libraries.push(manifest.into_request_entry());
+                let mut entry = manifest.into_request_entry();
+
+                // LBS §8.1: a library's host contract is *derived* from its
+                // `host_bridge.cln`, never hand-written. Synthesizing it here
+                // — rather than letting the compiler do it — is what keeps the
+                // request self-contained (FRM-BO-02, CMP-01): the WIT is an
+                // input to the compilation, so it has to exist before the
+                // compiler runs.
+                if let Some(interface) = HostInterface::load(&root)? {
+                    // LIB012, checked before synthesis. A library built into a
+                    // world it does not declare would produce imports no host
+                    // can satisfy, and the failure would land at instantiation
+                    // naming an interface the developer never wrote.
+                    if let Some(world) = target_world {
+                        if !interface.binds(world) {
+                            return Err(HostBridgeError::Unbound {
+                                library: package.name.clone(),
+                                interface: interface.name.clone(),
+                                worlds: interface.worlds.clone(),
+                                target: world.to_string(),
+                            }
+                            .into());
+                        }
+                    }
+
+                    // A library that also ships `[exports].wit` has said the
+                    // same thing twice, and the two can disagree. The declared
+                    // source wins over a checked-in artifact, but silently
+                    // preferring one would hide the contradiction.
+                    if !entry.wit.is_empty() {
+                        return Err(HostBridgeError::Syntax {
+                            path: root.join(crate::hostbridge::HOST_BRIDGE_FILE),
+                            line: 1,
+                            message: format!(
+                                "library '{}' declares both {} and [exports].wit in library.toml; \
+                                 the WIT is derived from the declarations (LBS §8.1), so remove one",
+                                package.name,
+                                crate::hostbridge::HOST_BRIDGE_FILE,
+                            ),
+                        }
+                        .into());
+                    }
+
+                    entry.wit = interface.to_wit(&package.name, &package.version);
+                }
+
+                closure.libraries.push(entry);
             }
             // Read and checked against its own WASM (FRM-PM-01..03) before it
             // can extend discovery. A plugin whose manifest disagrees with its

@@ -1190,3 +1190,180 @@ fn excluding_a_folder_excludes_what_is_inside_it() {
     let paths: Vec<&str> = request.sources.iter().map(|s| s.path.as_str()).collect();
     assert_eq!(paths, ["app/main.cln"]);
 }
+
+// ---------------------------------------------------------------------------
+// Host bridge — `host_bridge.cln` synthesized into `library_manifests[].wit`
+// (LBS §8, LBS-02, LIB012).
+// ---------------------------------------------------------------------------
+
+impl Project {
+    /// A library that declares a host bridge instead of shipping WIT.
+    ///
+    /// The mirror of [`Project::library`]: same lockfile entry, but the WIT is
+    /// derived from declarations rather than checked in — which is the whole
+    /// point of LBS §8.1.
+    fn bridged_library(
+        &self,
+        name: &str,
+        version: &str,
+        host_bridge: &str,
+        deps: &[&str],
+    ) -> String {
+        self.write(
+            &format!("vendor/{name}/library.toml"),
+            &format!("[library]\nname = \"{name}\"\nversion = \"{version}\"\n"),
+        );
+        self.write(&format!("vendor/{name}/host_bridge.cln"), host_bridge);
+
+        let deps_line = if deps.is_empty() {
+            String::new()
+        } else {
+            let quoted: Vec<String> = deps.iter().map(|d| format!("\"{d}\"")).collect();
+            format!("dependencies = [{}]\n", quoted.join(", "))
+        };
+
+        format!(
+            "[[package]]\nname = \"{name}\"\nversion = \"{version}\"\nkind = \"library\"\n\
+             path = \"vendor/{name}\"\n{deps_line}\n"
+        )
+    }
+}
+
+/// The `frame.storage` surface (STOR-01), declared for the `cli` world so it
+/// binds to the fixture project.
+const STORAGE_BRIDGE: &str = r#"
+host interface storage version "0.1.0":
+	requires host worlds ["cli"]
+
+	host function write(path: string, data: bytes) returns integer
+		description "Write bytes under the storage root. Returns 0 on success."
+
+	host function read(path: string) returns bytes
+		description "Read bytes back. Empty when the file is missing."
+
+	host function exists(path: string) returns boolean
+		description "Test for existence without reading the bytes."
+
+	host function delete(path: string) returns boolean
+		description "Remove a file. True on success."
+"#;
+
+#[test]
+fn a_libraries_host_bridge_is_synthesized_into_the_request_wit() {
+    // The end-to-end point of LBS §8: a library ships Clean declarations and
+    // no WIT, and the compiler is handed real WIT anyway.
+    let _env = FakeCompilerEnv::none();
+    let project = Project::hello();
+
+    let locked = project.bridged_library("frame.storage", "0.1.0", STORAGE_BRIDGE, &[]);
+    project.write_lockfile(&locked);
+
+    let request = assemble_request(&project.inputs()).expect("must assemble");
+
+    let library = request
+        .library_manifests
+        .iter()
+        .find(|l| l.name == "frame.storage")
+        .expect("the library must reach the compiler");
+
+    assert!(
+        library.wit.contains("package clean:library/frame.storage@0.1.0;"),
+        "{}",
+        library.wit
+    );
+    assert!(
+        library.wit.contains("write: func(path: string, data: list<u8>) -> s64;"),
+        "{}",
+        library.wit
+    );
+    assert!(library.wit.contains("exists: func(path: string) -> bool;"), "{}", library.wit);
+}
+
+#[test]
+fn a_library_that_does_not_bind_to_the_target_world_is_refused() {
+    // LIB012. The fixture targets `wasm32-cli`; a server-only library must not
+    // silently compile into it and fail at instantiation instead.
+    let _env = FakeCompilerEnv::none();
+    let project = Project::hello();
+
+    let server_only = STORAGE_BRIDGE.replace(r#"["cli"]"#, r#"["server"]"#);
+    let locked = project.bridged_library("frame.storage", "0.1.0", &server_only, &[]);
+    project.write_lockfile(&locked);
+
+    let error = assemble_request(&project.inputs()).expect_err("must refuse");
+
+    assert_eq!(error.code(), "LIB012");
+    let text = error.to_string();
+    assert!(text.contains("frame.storage"), "{text}");
+    assert!(text.contains("cli"), "{text}");
+}
+
+#[test]
+fn a_library_with_no_host_bridge_still_uses_its_declared_wit() {
+    // Most libraries import nothing from the host. The absence of the file is
+    // not an error, and must not blank out `[exports].wit`.
+    let _env = FakeCompilerEnv::none();
+    let project = Project::hello();
+
+    let locked = project.library("frame.pure", "1.0.0", "interface pure {}", &[]);
+    project.write_lockfile(&locked);
+
+    let request = assemble_request(&project.inputs()).expect("must assemble");
+
+    let library = &request.library_manifests[0];
+    assert_eq!(library.wit, "interface pure {}");
+}
+
+#[test]
+fn declaring_a_bridge_and_an_exports_wit_is_refused_as_a_contradiction() {
+    // Saying it twice lets the two disagree. The framework refuses rather than
+    // silently preferring one, because either choice would hide the conflict.
+    let _env = FakeCompilerEnv::none();
+    let project = Project::hello();
+
+    let locked = project.library("frame.both", "1.0.0", "interface both {}", &[]);
+    project.write("vendor/frame.both/host_bridge.cln", STORAGE_BRIDGE);
+    project.write_lockfile(&locked);
+
+    let error = assemble_request(&project.inputs()).expect_err("must refuse");
+
+    assert!(error.to_string().contains("both"), "{error}");
+}
+
+#[test]
+fn a_malformed_host_bridge_names_the_file_and_line() {
+    let _env = FakeCompilerEnv::none();
+    let project = Project::hello();
+
+    // A `host function` with no description — the mistake LBS-02 makes an error.
+    let broken = "host interface storage version \"0.1.0\":\n\
+                  \trequires host worlds [\"cli\"]\n\n\
+                  \thost function write(path: string) returns integer\n";
+    let locked = project.bridged_library("frame.storage", "0.1.0", broken, &[]);
+    project.write_lockfile(&locked);
+
+    let error = assemble_request(&project.inputs()).expect_err("must refuse");
+
+    let text = error.to_string();
+    assert!(text.contains("host_bridge.cln"), "{text}");
+    assert!(text.contains("description"), "{text}");
+}
+
+#[test]
+fn the_synthesized_wit_changes_the_request_hash() {
+    // The bridge is build identity: editing a declaration must not be served a
+    // cached component built against the old contract (§11.7).
+    let _env = FakeCompilerEnv::none();
+
+    let hash_for = |bridge: &str| {
+        let project = Project::hello();
+        let locked = project.bridged_library("frame.storage", "0.1.0", bridge, &[]);
+        project.write_lockfile(&locked);
+        assemble_request(&project.inputs()).unwrap().sha256().unwrap()
+    };
+
+    let baseline = hash_for(STORAGE_BRIDGE);
+    let renamed = hash_for(&STORAGE_BRIDGE.replace("host function write(", "host function store("));
+
+    assert_ne!(baseline, renamed);
+}
