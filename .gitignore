@@ -16,3 +16,6 @@ testing/fixtures/**/.cln/
 
 # Cargo.lock IS committed — this repo ships a binary, so the lockfile is what
 # makes a release reproducible.
+
+# macOS Finder metadata. Never meaningful in a repository.
+.DS_Store
