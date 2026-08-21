@@ -85,6 +85,15 @@ pub enum ClosureError {
     )]
     NotResolved { project_root: PathBuf },
 
+    /// A validated `plugin.wasm` could not be read back for the request.
+    #[error("could not read {} for plugin '{name}': {source}", .path.display())]
+    PluginWasmUnreadable {
+        name: String,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     /// The lockfile names a package whose files are not where it says.
     #[error("dependency '{name}' is not at {}", .path.display())]
     Missing { name: String, path: PathBuf },
@@ -126,6 +135,7 @@ impl ClosureError {
             ClosureError::HostBridge(e) => e.code(),
             // All of these mean the lockfile does not describe a buildable
             // closure — the same class of failure as a malformed lockfile.
+            ClosureError::PluginWasmUnreadable { .. } => "CFG003",
             ClosureError::Missing { .. }
             | ClosureError::Dangling { .. }
             | ClosureError::Cycle { .. }
@@ -156,6 +166,9 @@ impl ClosureError {
             }
             ClosureError::RegistryUnsupported { .. } => {
                 Some("use a path or git dependency until registry support lands".into())
+            }
+            ClosureError::PluginWasmUnreadable { .. } => {
+                Some("run `cln fetch` to re-materialize the plugin".into())
             }
             ClosureError::Plugin(e) => e.help(),
             ClosureError::Resolve(e) => e.help(),
@@ -293,13 +306,38 @@ pub fn read_closure_for_world(
                 // interface) and `compiletime_wasm_sha256` carries the hash,
                 // which is exactly what that field means: the WASM this
                 // dependency contributes at compile time.
-                closure.libraries.push(RequestLibrary {
-                    name: loaded.name().to_string(),
-                    version: loaded.manifest.plugin.version.clone(),
-                    wit: String::new(),
-                    handles_blocks: Vec::new(),
-                    compiletime_wasm_sha256: Some(loaded.wasm_sha256.clone()),
-                });
+                // The bytes travel with the hash, not just the hash: CMP-01
+                // leaves the compiler nowhere to fetch the artifact a bare
+                // hash names, so a hash-only entry describes a WASM the
+                // compiler cannot obtain.
+                let wasm = std::fs::read(&loaded.wasm_path).map_err(|source| {
+                    ClosureError::PluginWasmUnreadable {
+                        name: loaded.name().to_string(),
+                        path: loaded.wasm_path.clone(),
+                        source,
+                    }
+                })?;
+
+                closure.libraries.push(
+                    RequestLibrary {
+                        name: loaded.name().to_string(),
+                        version: loaded.manifest.plugin.version.clone(),
+                        wit: String::new(),
+                        handles_blocks: Vec::new(),
+                        compiletime_wasm: None,
+                        compiletime_wasm_sha256: None,
+                    }
+                    .with_compiletime_wasm(&wasm),
+                );
+
+                // The hash the plugin loader computed and the one the request
+                // carries must be the same number. They are computed from the
+                // same bytes by different code, and a mismatch would mean the
+                // file changed between validation and read.
+                debug_assert_eq!(
+                    closure.libraries.last().unwrap().compiletime_wasm_sha256.as_deref(),
+                    Some(loaded.wasm_sha256.as_str()),
+                );
 
                 closure.plugins.push(loaded);
             }

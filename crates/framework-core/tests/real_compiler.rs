@@ -504,26 +504,112 @@ fn the_real_compiler_accepts_our_synthesized_library_wit() {
         library.wit
     );
 
-    // The compiler's half is what this test exists to check. It fails today —
-    // see the defect note above — so the assertion is written to say exactly
-    // what is wrong rather than just going red. When the compiler relaxes the
-    // field, this flips to a plain `.expect(...)` and the note comes out.
+    // The compiler's half is what this test exists to check. It fails against
+    // the shipped 0.1.0 binary, which requires `compiletime_wasm_sha256` on
+    // every entry — so a library with no compile-time handler, which is every
+    // host-bridge-only library, cannot be built. The field is optional in
+    // Platform 14 §14.1.1 and in the compiler's current source; 0.1.0 predates
+    // that. The assertion names the specific diagnostic so this goes green on
+    // its own once a compiler carrying the fix is installed.
     let outcome = build(
         &project.inputs_against_installed_contracts(),
         &compiler(binary),
     );
 
     if let Err(error) = &outcome {
-        let blocked = error.to_diagnostics().iter().any(|d| {
-            d.code == "RQD002" && d.message.contains("compiletime_wasm_sha256")
-        });
+        let diagnostics = error.to_diagnostics();
+        let blocked = diagnostics
+            .iter()
+            .any(|d| d.code == "RQD002" && d.message.contains("compiletime_wasm_sha256"));
         assert!(
             !blocked,
-            "compiler 0.1.0 still requires `compiletime_wasm_sha256` for a library \
-             that ships no compile-time handler; Platform 14 §14.1.1 makes it optional. \
-             Until this is relaxed, no host-bridge-only library can be built."
+            "the installed compiler still requires `compiletime_wasm_sha256` for a \
+             library that ships no compile-time handler; install a compiler built \
+             after that field was made optional"
         );
     }
 
     outcome.expect("the compiler must accept a library whose WIT we synthesized");
+}
+
+#[test]
+#[ignore = "requires a Manager-installed compiler"]
+fn the_real_compiler_accepts_a_plugins_inline_wasm() {
+    // A plugin reaches the compiler as a `library_manifests[]` entry carrying
+    // its WASM inline (ADR-0004). The compiler validates three things about
+    // that pairing — base64 alphabet, padding, and that the hash is over the
+    // decoded bytes — and answers `LIB004` when any of them is wrong.
+    //
+    // This is the test that would have caught the framework sending only the
+    // hash: the compiler cannot fetch the artifact a bare hash names (CMP-01),
+    // so a hash-only entry names a WASM it has no way to obtain.
+    let binary = require_compiler!();
+    require_server_contract!();
+
+    let project = Project::targeting(
+        "wasm32-server",
+        "clean-server",
+        SERVER_HOST_VERSION,
+        "start:\n\tinteger x = 42\n",
+    );
+
+    // A minimal well-formed component: magic plus version. Enough to be read
+    // as WASM and hashed; not enough to expand a block, which is why this
+    // plugin registers none.
+    let wasm: &[u8] = b"\0asm\x01\0\0\0";
+    let vendor = project.path().join("vendor/frame.probe");
+    std::fs::create_dir_all(&vendor).unwrap();
+    std::fs::write(vendor.join("plugin.wasm"), wasm).unwrap();
+    std::fs::write(
+        vendor.join("plugin.toml"),
+        "[plugin]\nname = \"frame.probe\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(project.path().join(".cln")).unwrap();
+    let lock = project.path().join(".cln/lock.toml");
+    let mut body = std::fs::read_to_string(&lock).unwrap_or_default();
+    body.push_str(
+        "\n[[package]]\nname = \"frame.probe\"\nversion = \"0.1.0\"\nkind = \"plugin\"\n\
+         path = \"vendor/frame.probe\"\n",
+    );
+    std::fs::write(&lock, body).unwrap();
+
+    let request =
+        framework_core::build::assemble_request(&project.inputs_against_installed_contracts())
+            .expect("assembling a request with a plugin must succeed");
+
+    let entry = request
+        .library_manifests
+        .iter()
+        .find(|l| l.name == "frame.probe")
+        .expect("the plugin must reach the compiler");
+
+    // Both halves travel, and the hash is over the decoded bytes.
+    assert_eq!(entry.compiletime_wasm.as_deref(), Some("AGFzbQEAAAA="));
+    assert_eq!(
+        entry.compiletime_wasm_sha256.as_deref(),
+        Some("93a44bbb96c751218e4c00d479e4c14358122a389acca16205b1e4d0dc5f9476"),
+    );
+
+    // And the compiler agrees. A `LIB004` here means our encoding is wrong.
+    let outcome = build(
+        &project.inputs_against_installed_contracts(),
+        &compiler(binary),
+    );
+
+    if let Err(error) = &outcome {
+        let diagnostics = error.to_diagnostics();
+        let rejected: Vec<&str> = diagnostics
+            .iter()
+            .filter(|d| d.code == "LIB004")
+            .map(|d| d.message.as_str())
+            .collect();
+        assert!(
+            rejected.is_empty(),
+            "the compiler rejected our inline WASM: {rejected:?}"
+        );
+    }
+
+    outcome.expect("a plugin carrying its WASM inline must build");
 }

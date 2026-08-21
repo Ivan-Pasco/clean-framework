@@ -174,6 +174,86 @@ pub struct LibraryManifest {
     pub handles_blocks: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compiletime_wasm_sha256: Option<String>,
+
+    /// The block-handler WASM itself, standard-alphabet base64 **with**
+    /// padding (ADR-0004).
+    ///
+    /// Platform 14 §14.1.1 models only the hash, which cannot work: CMP-01
+    /// leaves the compiler nowhere to *fetch* the artifact that hash names, so
+    /// the bytes have to travel in the request like every other input. The
+    /// compiler carries this as a provisional schema addition; this field is
+    /// the framework's half of it.
+    ///
+    /// Three properties the compiler enforces, all verified against the real
+    /// binary rather than inferred:
+    ///
+    /// - The alphabet is standard and the padding is required — unpadded
+    ///   base64 is rejected as "not valid base64".
+    /// - `compiletime_wasm_sha256` is the hash of the **decoded** bytes, not
+    ///   of this string.
+    /// - That hash must be lowercase hex.
+    ///
+    /// `None` for a library that registers no `handles_blocks`. A library that
+    /// registers blocks and omits this cannot have them expanded, and the
+    /// compiler says so with `LIB004`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiletime_wasm: Option<String>,
+}
+
+impl LibraryManifest {
+    /// Attach a compile-time handler: the WASM inline, plus the hash of it.
+    ///
+    /// The two fields are set together because they are one fact stated twice,
+    /// and the compiler rejects the pair when they disagree (`LIB004`).
+    /// Letting a caller set either alone is how they drift.
+    pub fn with_compiletime_wasm(mut self, wasm: &[u8]) -> Self {
+        self.compiletime_wasm_sha256 = Some(sha256_hex(wasm));
+        self.compiletime_wasm = Some(base64_standard(wasm));
+        self
+    }
+}
+
+/// Hex-lowercase SHA-256, the spelling every hash in the request uses.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Standard-alphabet base64, padded.
+///
+/// Hand-rolled rather than pulled in as a dependency: this is the only base64
+/// in the workspace, the encoder is twenty lines, and the compiler seam is the
+/// place where an extra dependency is least welcome. The padding is not
+/// optional — the compiler rejects unpadded input outright.
+fn base64_standard(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(ALPHABET[(triple >> 18) as usize & 0x3f] as char);
+        out.push(ALPHABET[(triple >> 12) as usize & 0x3f] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(triple >> 6) as usize & 0x3f] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[triple as usize & 0x3f] as char
+        } else {
+            '='
+        });
+    }
+
+    out
 }
 
 /// FRM-BO-08. One entry per overridden value; the compiler applies it and
@@ -332,5 +412,69 @@ mod tests {
         let back: RequestDocument =
             serde_json::from_slice(&doc.to_canonical_json().unwrap()).unwrap();
         assert_eq!(doc, back);
+    }
+}
+
+#[cfg(test)]
+mod compiletime_wasm_tests {
+    use super::*;
+
+    fn entry() -> LibraryManifest {
+        LibraryManifest {
+            name: "frame.data".into(),
+            version: "1.0.0".into(),
+            wit: String::new(),
+            handles_blocks: vec!["data".into()],
+            compiletime_wasm_sha256: None,
+            compiletime_wasm: None,
+        }
+    }
+
+    /// The three properties the real compiler enforces, verified against
+    /// `clean-compiler 0.1.0` by probing it directly: standard alphabet,
+    /// padding required, hash over the *decoded* bytes in lowercase hex.
+    #[test]
+    fn pairs_the_bytes_with_the_hash_of_those_bytes() {
+        // A minimal well-formed WASM module: magic plus version.
+        let wasm = b"\0asm\x01\0\0\0";
+        let entry = entry().with_compiletime_wasm(wasm);
+
+        assert_eq!(entry.compiletime_wasm.as_deref(), Some("AGFzbQEAAAA="));
+        assert_eq!(
+            entry.compiletime_wasm_sha256.as_deref(),
+            Some("93a44bbb96c751218e4c00d479e4c14358122a389acca16205b1e4d0dc5f9476"),
+            "the hash must be over the decoded bytes, not the base64"
+        );
+    }
+
+    #[test]
+    fn the_encoding_is_padded() {
+        // Every input length mod 3 must round-trip to a 4-char group. The
+        // compiler rejects unpadded base64 outright, so the `=` matter.
+        assert_eq!(base64_standard(b"a"), "YQ==");
+        assert_eq!(base64_standard(b"ab"), "YWI=");
+        assert_eq!(base64_standard(b"abc"), "YWJj");
+        assert_eq!(base64_standard(b""), "");
+    }
+
+    #[test]
+    fn the_encoding_covers_the_whole_alphabet_including_the_high_bytes() {
+        // `+` and `/` are the two characters a url-safe encoder would get
+        // wrong, and they only appear for high byte values.
+        assert_eq!(base64_standard(&[0xfb, 0xef, 0xbe]), "++++");
+        assert_eq!(base64_standard(&[0xff, 0xff, 0xff]), "////");
+
+        let all: Vec<u8> = (0u8..=255).collect();
+        let encoded = base64_standard(&all);
+        assert_eq!(encoded.len(), 344, "256 bytes encode to 344 padded chars");
+        assert!(encoded.ends_with('='), "{encoded}");
+    }
+
+    #[test]
+    fn a_library_with_no_handler_carries_neither_field() {
+        // Both are skipped on the wire, which is what lets a bridge-only
+        // library have no compile-time artifact at all.
+        let json = serde_json::to_string(&entry()).unwrap();
+        assert!(!json.contains("compiletime_wasm"), "{json}");
     }
 }

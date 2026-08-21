@@ -307,6 +307,7 @@ data = "^3.1"
             wit: "interface data {}".into(),
             handles_blocks: vec!["table".into()],
             compiletime_wasm_sha256: None,
+            compiletime_wasm: None,
         });
 
         let doc = lower(&m, &contract(), &closure, hello_sources(), &[]);
@@ -330,6 +331,7 @@ data = "^3.1"
             wit: String::new(),
             handles_blocks: Vec::new(),
             compiletime_wasm_sha256: None,
+            compiletime_wasm: None,
         };
 
         let m = manifest_from(

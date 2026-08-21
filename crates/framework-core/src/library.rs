@@ -264,9 +264,11 @@ impl LibraryManifest {
 
     /// Project into the request document's `library_manifests[]` entry.
     ///
-    /// `compiletime_wasm_sha256` stays `None`: it is the hash of the compiled
-    /// block handler, which Phase 3 produces. Filling it with anything now
-    /// would be a claim the framework cannot back.
+    /// `compiletime_wasm_sha256` and `compiletime_wasm` stay `None`: they
+    /// describe the compiled block handler, which Phase 3 produces. Filling
+    /// either now would be a claim the framework cannot back — and the
+    /// compiler checks that the two agree, so a guess would surface as
+    /// `LIB004` rather than as a quiet mistake.
     pub fn into_request_entry(self) -> RequestLibrary {
         let handles_blocks = self.handled_blocks();
         RequestLibrary {
@@ -275,6 +277,7 @@ impl LibraryManifest {
             wit: self.exports.and_then(|e| e.wit).unwrap_or_default(),
             handles_blocks,
             compiletime_wasm_sha256: None,
+            compiletime_wasm: None,
         }
     }
 }
