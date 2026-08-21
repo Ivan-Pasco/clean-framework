@@ -3,7 +3,12 @@
 **From:** framework, against clean-cli's `host.wit` at HEAD and compiler 0.1.0
 **Date:** 2026-08-20
 **Status:** blocking — no project can target `wasm32-cli` today
-**Needs:** a decision from clean-cli; the framework has not worked around it
+**Needs:** a CONF-02 amendment from foundation, which owns 07 §7.2
+
+**Answered 2026-08-20 by clean-cli.** Their reply is recorded in §"Where this
+landed" at the foot of this document, along with the two things this write-up
+got wrong. Read that section rather than the options list above — the options
+are kept for the record, not as live proposals.
 
 ---
 
@@ -151,3 +156,108 @@ which is how we know this is a contract question and not a plumbing one.
 
 When `host.wit` declares whatever it ends up declaring, we'll re-run against the
 real contract and delete the fixture's special case.
+
+
+---
+
+## Where this landed
+
+clean-cli answered on 2026-08-20. Both of their corrections check out against
+the repository, and one of them makes a section of this document wrong. Recording
+it here rather than quietly editing the text above.
+
+### Option 1 is not merely unwise — it is forbidden
+
+We raised the objection ourselves and then listed declaring `world cli` as the
+most consistent option anyway. That was a mistake: **HCV-06 (Platform 16
+§16.14) makes it a hard failure**, not a judgement call. Its stub-import
+prohibition is explicit:
+
+> The correct response to an unimplemented interface is to omit it from
+> `host.wit` (so the framework catches it at Moment 1) or to not register it in
+> the Linker (so WASI catches it at load). Stubs defeat both check moments and
+> turn missing capabilities into silent runtime failures.
+
+So `host.wit` declaring only `cli-default` is not an oversight or a
+half-finished edit — it is the rule being followed. clean-cli's `check_world`
+already refuses a `commands`-exporting guest with a message naming the missing
+mode. Declaring `cli` would replace that clear refusal with the deferred
+instantiation failure we said would be worse. They agreed with our reasoning;
+we had simply failed to follow it to its conclusion.
+
+### We were wrong that the mapping question was unowned
+
+We wrote that changing the target-to-world mapping "isn't ours to change
+unilaterally," which is true, and implied the question was therefore open. It
+is not: it has a recorded outcome. `foundation/work/host-wit-rename-prompts/README.md`
+lists under **Still open**:
+
+> **`wasm32-cli` stays blocked**, correctly. No CLI host implementation exists —
+> `Ivan-Pasco/clean-runtime` is a name only; the nearest candidate
+> (`clean-runner`) is pre-Component-Model with `func_wrap` stubs. HCV-06 forbids
+> declaring interfaces against that.
+
+The block was accepted deliberately. **But its premise is now stale** — that
+note was written when no CLI host existed, and clean-cli now implements
+`cli-default` for real with the HCV-06 parity check green. That is a materially
+different situation from the one the decision was made in, which is what makes
+revisiting it reasonable rather than re-litigating settled ground.
+
+### On the fixture note
+
+We read a comment in our test fixture as a workaround that had hidden the gap
+from us. clean-cli points out it simply restates their published scope —
+`host.wit`'s own SCOPE paragraph says the same thing, and the two files agree.
+Nothing was concealed. The fixture stays as it is.
+
+### The recommendation, and why we no longer object to it
+
+clean-cli recommends option 3, narrowed to one added target:
+
+| Target | World | Host status |
+|---|---|---|
+| `wasm32-cli` | `cli` | not implemented — reserved for CLIH-05 |
+| `wasm32-cli-default` | `cli-default` | implemented today |
+
+We objected that this "pushes a decision onto developers that CLIH-06
+deliberately makes automatic." That objection was confused, and their answer is
+correct: **two different selections are involved.** CLIH-06 selects the runtime
+*mode* by inspecting the guest's exports at startup, and stays automatic and
+untouched. The build target selects which *world you compile against* — a
+choice the developer already makes when they write a `commands` export rather
+than a `default` one. Under CLIH-20 those guest shapes are disjoint, so no
+developer is ever asked to decide something CLIH-06 would have decided for
+them. The second target makes an existing choice visible in `clean.toml`; it
+does not create a new one.
+
+### What happens next, and who does it
+
+Neither option 2 nor option 3 is implementable by the framework. Platform 07
+§7.2 is the home of the built-in target table and states plainly:
+
+> Adding a target is a spec change, not a config change.
+
+So the change lands in foundation first, and the framework follows. clean-cli
+is filing the CONF-02 question with foundation directly, which is right — it
+belongs with the owner of §7.2 rather than being settled between the two of us.
+
+**The framework's position, for whoever picks this up:** we implement whatever
+§7.2 says, and we have no stake in which of option 2 or option 3 is chosen.
+Option 3 costs us one row in `world_for_target` and one in `BUILT_IN_TARGETS`.
+Option 2 costs us a one-line change to an existing row. Both are trivial on our
+side; the difference between them is entirely about whether the ecosystem wants
+a target still pointing at `cli` for when CLIH-05 is implemented.
+
+### On the release
+
+clean-cli will attach `host.wit` to a tagged release and send the URL shape
+once it exists, rather than have us guess at it now. That is the piece our
+fetcher will point at. Wiring the fetcher is ours and is unblocked — it does
+not depend on the world question.
+
+### One fix on their side
+
+`host.wit` cited a `world.rs` that does not exist in that repository; the logic
+is `check_world` in `entrypoint.rs`. Anyone following the pointer would have
+found nothing and reasonably concluded the refusal path was unimplemented.
+Corrected on their side. No declared world changed.

@@ -121,6 +121,22 @@ pub struct TargetSection {
 /// Which world each built-in target maps to (Platform 07 §7.2). This is the
 /// `world` field of `target_world`: the framework selects, the compiler is
 /// told. Resolving it compiler-side is what BVER-03 forbids.
+///
+/// **This table mirrors §7.2 and must not diverge from it.** "Adding a target
+/// is a spec change, not a config change" — so a target that ought to exist is
+/// added to §7.2 first and reflected here second, never the other way round.
+///
+/// One consequence is visible today: `wasm32-cli` maps to `cli`, and the
+/// shipped `clean-cli/host.wit` declares only `cli-default`, so no CLI project
+/// builds. That is not a bug on either side. HCV-06 (Platform 16 §16.14)
+/// forbids a host declaring an interface it does not register, and clean-cli
+/// has not implemented the named-subcommand mode yet — so omitting `cli` is
+/// the rule being followed, and our `CFG001` at Moment 1 is the intended
+/// failure rather than a missed case.
+///
+/// Resolving it needs a CONF-02 amendment (remap `wasm32-cli`, or add a
+/// `wasm32-cli-default` target); either is a one-line change here once §7.2
+/// says so. See `system-documents/host-world-findings-for-clean-cli.md`.
 pub fn world_for_target(target: &str) -> Option<&'static str> {
     match target {
         "wasm32-server" | "wasm64-server" => Some("server"),
@@ -422,6 +438,51 @@ version = "0.1.0"
         assert_eq!(
             m.target_section().unwrap().wit_source.as_deref(),
             Some("https://example.test/host.wit")
+        );
+    }
+
+    #[test]
+    fn the_target_table_matches_platform_07_section_7_2() {
+        // This table is a mirror of §7.2, and drift is the failure mode that
+        // matters: the framework tells the compiler which world to validate
+        // against (BVER-03 forbids the compiler resolving it), so a wrong
+        // entry here validates a program against the wrong contract silently.
+        //
+        // Adding a target is a spec change. If this test fails, either §7.2
+        // changed and this table has not caught up, or someone added a target
+        // here that the spec does not have.
+        assert_eq!(world_for_target("wasm32-server"), Some("server"));
+        assert_eq!(world_for_target("wasm64-server"), Some("server"));
+        assert_eq!(world_for_target("wasm32-browser"), Some("browser"));
+        assert_eq!(world_for_target("wasm32-cli"), Some("cli"));
+        assert_eq!(world_for_target("wasm32-embedded"), Some("embedded"));
+
+        // Exactly these, no more: an extra entry is a target invented here
+        // rather than in the spec.
+        assert_eq!(BUILT_IN_TARGETS.len(), 5, "the spec lists five built-in targets");
+    }
+
+    #[test]
+    fn wasm32_cli_still_targets_the_world_clean_cli_does_not_declare() {
+        // Deliberately pinned. `wasm32-cli` → `cli`, while the shipped
+        // clean-cli declares only `cli-default` — so CLI projects do not
+        // build, and that is the intended behaviour of both sides: HCV-06
+        // forbids clean-cli declaring a world it has not implemented, and our
+        // Moment 1 check refuses a target whose world the contract lacks.
+        //
+        // The resolution is a CONF-02 amendment owned by foundation, not a fix
+        // here. This test exists so that if the mapping changes, it changes
+        // because someone amended §7.2 and updated this test on purpose —
+        // rather than someone "fixing" a CLI build and quietly pointing the
+        // framework at a different contract than the spec says.
+        assert_eq!(
+            world_for_target("wasm32-cli"),
+            Some("cli"),
+            "if §7.2 has been amended, update this test and the mapping together"
+        );
+        assert!(
+            !BUILT_IN_TARGETS.contains(&"wasm32-cli-default"),
+            "a wasm32-cli-default target needs §7.2 to declare it first"
         );
     }
 
