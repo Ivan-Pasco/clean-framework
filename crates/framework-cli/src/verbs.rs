@@ -51,6 +51,13 @@ enum Verb {
 
     /// Scaffold a new project.
     New(NewArgs),
+
+    /// Serve the Clean MCP server on stdio.
+    ///
+    /// The toolchain's single MCP endpoint (Framework §10.1). Speaks JSON-RPC
+    /// on stdin/stdout, so stdout carries protocol traffic and nothing else —
+    /// any progress output would corrupt the stream.
+    Mcp,
 }
 
 #[derive(Parser, Debug)]
@@ -164,6 +171,7 @@ where
         Verb::Check(args) => run_check(args),
         Verb::Cache(args) => run_cache(args),
         Verb::New(args) => run_new(args),
+        Verb::Mcp => run_mcp(),
     }
 }
 
@@ -472,6 +480,38 @@ fn report_failure(error: &FrameworkError) -> ExitCode {
     ExitCode::from(1)
 }
 
+/// `cln mcp` — serve the Clean MCP server on stdio (Framework §10).
+///
+/// The project is chosen from the working directory (§10.9 rule 4). Running
+/// outside any project is supported: project-backed tools report that there is
+/// nothing to answer about, and language-backed tools still work once a
+/// compiler implements the language-info API.
+fn run_mcp() -> ExitCode {
+    let working_directory = match std::env::current_dir() {
+        Ok(directory) => directory,
+        Err(error) => {
+            eprintln!("cannot determine the working directory: {error}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut server = framework_mcp::Server::with_default_language(&working_directory);
+
+    match server.serve(stdin.lock(), stdout.lock()) {
+        Ok(()) => ExitCode::SUCCESS,
+        // A broken pipe is the ordinary way an MCP session ends: the client
+        // closed the connection. Reporting it as a failure would make every
+        // clean disconnect look like a crash.
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("mcp transport failed: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,7 +521,9 @@ mod tests {
         // three parses here. `cache` does not — it has its own shape.
         match Cli::try_parse_from(args).unwrap().command {
             Verb::Build(a) | Verb::Package(a) | Verb::Check(a) => a,
-            Verb::Cache(_) | Verb::New(_) => panic!("this verb does not take BuildArgs"),
+            Verb::Cache(_) | Verb::New(_) | Verb::Mcp => {
+                panic!("this verb does not take BuildArgs")
+            }
         }
     }
 

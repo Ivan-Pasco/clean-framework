@@ -288,6 +288,7 @@ dependencies = [
  "clap",
  "framework-compiler-driver",
  "framework-core",
+ "framework-mcp",
  "framework-package",
  "framework-scaffold",
  "semver",
@@ -331,6 +332,17 @@ dependencies = [
  "thiserror 1.0.69",
  "toml",
  "wasmparser",
+]
+
+[[package]]
+name = "framework-mcp"
+version = "0.1.6"
+dependencies = [
+ "framework-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
