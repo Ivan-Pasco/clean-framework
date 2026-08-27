@@ -349,11 +349,23 @@ argue with.
    host registers and no browser host exists. An include of an empty world composes just
    as well, and every later browser addition is inherited for free.
 
-2a. **The two halves are declared by two owners.** Per §4's correction, a device API's
-   outbound functions live in `frame.device`'s `host_bridge.cln` and its callbacks live in
-   this `host.wit`. Nothing checks the two agree — a library could declare
-   `capturePhoto(callback: handler)` against a host that never calls back. Worth deciding
-   whether that warrants a check, or whether the compiler's World Import Check covers it.
+2a. **~~The two halves are declared by two owners.~~ RESOLVED 2026-08-27: checked, coarsely.**
+   A device API's outbound functions live in `frame.device`'s `host_bridge.cln` and its
+   callbacks in this `host.wit`, and the compiler's World Import Check does *not* cover
+   the gap: the guest imports nothing wrong, so it is satisfied, and the symptom is a
+   callback that never arrives on a device.
+
+   `crates/framework-core/src/callback.rs` now checks it during the build, beside LIB012
+   where the interface is already parsed. A library declaring a `handler` parameter is
+   asking to be called back; if the target world declares no callback imports at all, the
+   build fails naming the library, the function, and the host contract to edit.
+
+   **The check is deliberately coarse.** It asks "can this host call back at all", never
+   "does the *right* callback exist". Matching `capturePhoto` to `photo-captured` would
+   need a naming convention the spec never stated and a library author could not discover.
+   The narrower check becomes possible the day a library can name the callback it expects
+   — `callback.rs` is where it would go. A coarse check that never cries wolf is worth
+   more than a precise one built on an invented rule.
 
 3. **Callback delivery on the wasmtime seat.** In the WebView the callbacks are a JS
    bridge hop. In an embedded wasmtime they are direct component calls. The *signatures*

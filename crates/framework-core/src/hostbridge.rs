@@ -297,6 +297,27 @@ pub enum HostBridgeError {
         worlds: Vec<String>,
         target: String,
     },
+
+    /// The callback half of the contract is missing. See [`crate::callback`]
+    /// for why nothing else catches this: the guest imports nothing wrong, so
+    /// every existing check passes and the failure lands on a user's device as
+    /// a callback that never arrives.
+    #[error(
+        "library '{library}' declares {} the host to call back ({}), \
+         but host '{host}' declares no callback imports in world '{world}'",
+        if .functions.len() == 1 {
+            "a host function that expects"
+        } else {
+            "host functions that expect"
+        },
+        .functions.join(", ")
+    )]
+    NoCallbackPath {
+        library: String,
+        host: String,
+        world: String,
+        functions: Vec<String>,
+    },
 }
 
 impl HostBridgeError {
@@ -308,6 +329,11 @@ impl HostBridgeError {
             HostBridgeError::Misplaced { .. } => "LIB019",
             HostBridgeError::Syntax { .. } => "CFG001",
             HostBridgeError::Unbound { .. } => "LIB012",
+            // No registry code of its own yet: this check is new and Platform
+            // 09 has not minted one. LIB012 is the nearest neighbour — both
+            // are "this library cannot bind to this host" — and inventing an
+            // unregistered code here would be worse than reusing a true one.
+            HostBridgeError::NoCallbackPath { .. } => "LIB012",
         }
     }
 
@@ -326,6 +352,15 @@ impl HostBridgeError {
                  followed by an indented `description \"…\"`"
                     .into(),
             ),
+            // Both halves are named, because the fix is usually on the host
+            // side and the library author cannot make it: `host_bridge.cln`
+            // has no production for an `import`, so the callback can only be
+            // declared in the host's hand-written host.wit.
+            HostBridgeError::NoCallbackPath { host, world, .. } => Some(format!(
+                "declare the callback as an `import` in {host}'s host.wit, inside \
+`world {world}` — a library cannot declare one, so this is a change to the host \
+contract; or drop the `handler` parameter if the function needs no reply"
+            )),
             HostBridgeError::Unreadable { .. } => None,
         }
     }

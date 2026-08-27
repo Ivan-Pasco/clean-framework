@@ -1367,3 +1367,85 @@ fn the_synthesized_wit_changes_the_request_hash() {
 
     assert_ne!(baseline, renamed);
 }
+
+// ---------------------------------------------------------------------------
+// The callback half of a library's host contract.
+// ---------------------------------------------------------------------------
+
+impl Project {
+    /// A library whose `host_bridge.cln` declares one function, plus its lock
+    /// entry. Unlike [`Project::library`] the WIT is *derived* from the
+    /// declaration (LBS §8.1), so this is the shape a real library ships.
+    fn bridge_library(&self, name: &str, version: &str, bridge: &str) -> String {
+        self.write(
+            &format!("vendor/{name}/library.toml"),
+            &format!("[library]\nname = \"{name}\"\nversion = \"{version}\"\n"),
+        );
+        self.write(&format!("vendor/{name}/host_bridge.cln"), bridge);
+        format!(
+            "[[package]]\nname = \"{name}\"\nversion = \"{version}\"\nkind = \"library\"\n\
+             path = \"vendor/{name}\"\n\n"
+        )
+    }
+}
+
+#[test]
+fn a_library_expecting_a_callback_from_a_silent_host_fails_the_build() {
+    // THE GAP THIS CLOSES, end to end.
+    //
+    // The library asks the host to call back — that is what `handler` means.
+    // The `cli` world in the fixture contract exports `env` and imports
+    // nothing, so the host has no way to make that call.
+    //
+    // Every other check passes: the library is well-formed, it binds to `cli`
+    // (LIB012), and the guest imports nothing the contract lacks. Without the
+    // callback check this build succeeds and the failure appears only at
+    // runtime, as a callback that never arrives.
+    let _env = FakeCompilerEnv::none();
+    let project = Project::hello();
+
+    let locked = project.bridge_library(
+        "frame.device",
+        "0.1.0",
+        "host interface device version \"0.1.0\":\n\
+         \trequires host worlds [\"cli\"]\n\n\
+         \thost function requestPhoto(quality: integer, callback: handler) returns integer\n\
+         \t\tdescription \"Open the capture UI.\"\n",
+    );
+    project.write_lockfile(&locked);
+
+    let err = assemble_request(&project.inputs())
+        .expect_err("a callback with no host import must not build");
+
+    let text = err.to_string();
+    assert!(text.contains("frame.device"), "must name the library: {text}");
+    assert!(text.contains("requestPhoto"), "must name the function: {text}");
+    assert!(text.contains("clean-cli"), "must name the host to fix: {text}");
+
+    // The remedy is on the host side, and the message has to say so — a
+    // library author cannot declare an import, so "fix your library" would
+    // send them somewhere they cannot fix it.
+    let help = err.help().unwrap_or_default();
+    assert!(help.contains("host.wit"), "help must point at the host contract: {help}");
+}
+
+#[test]
+fn a_library_wanting_no_callback_builds_against_the_same_host() {
+    // The control. Same host, same world, no `handler` — so the check must
+    // stay silent. Without this, a check that rejected everything would look
+    // just as green as one that works.
+    let _env = FakeCompilerEnv::none();
+    let project = Project::hello();
+
+    let locked = project.bridge_library(
+        "frame.quiet",
+        "0.1.0",
+        "host interface quiet version \"0.1.0\":\n\
+         \trequires host worlds [\"cli\"]\n\n\
+         \thost function writeLine(text: string) returns integer\n\
+         \t\tdescription \"Write one line to stdout.\"\n",
+    );
+    project.write_lockfile(&locked);
+
+    assemble_request(&project.inputs()).expect("a library with no callbacks must build");
+}

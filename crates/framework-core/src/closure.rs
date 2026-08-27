@@ -186,7 +186,7 @@ impl ClosureError {
 /// yields an empty closure, which is a different thing: the project resolved,
 /// and resolved to nothing.
 pub fn resolve(project_root: &Path) -> Result<Option<ResolvedClosure>, ClosureError> {
-    resolve_for_world(project_root, None)
+    resolve_for_world(project_root, None, None)
 }
 
 /// [`resolve`], told which world the component targets.
@@ -194,14 +194,23 @@ pub fn resolve(project_root: &Path) -> Result<Option<ResolvedClosure>, ClosureEr
 /// The world is what LIB012 is checked against, so a caller that knows it —
 /// every real build does — gets the check. `None` skips it, for callers that
 /// only want the closure read (`cln fetch`, tests of the walk itself).
+///
+/// `host_contract` is `(host name, host.wit)` when the caller has it. It
+/// enables the callback check ([`crate::callback`]) on the same pass: a library
+/// asking the host to call back needs the host to declare a matching import,
+/// and only the contract can say whether it does. The name travels alongside
+/// because the diagnostic must name the host whose contract to edit, and the
+/// WIT's own `package clean:host` line does not say which host published it.
+/// `None` skips that check for the same callers that skip LIB012.
 pub fn resolve_for_world(
     project_root: &Path,
     target_world: Option<&str>,
+    host_contract: Option<(&str, &str)>,
 ) -> Result<Option<ResolvedClosure>, ClosureError> {
     let Some(lockfile) = Lockfile::load(project_root)? else {
         return Ok(None);
     };
-    read_closure_for_world(project_root, &lockfile, target_world).map(Some)
+    read_closure_for_world(project_root, &lockfile, target_world, host_contract).map(Some)
 }
 
 /// Read every package in `lockfile` from disk and project it.
@@ -209,7 +218,7 @@ pub fn read_closure(
     project_root: &Path,
     lockfile: &Lockfile,
 ) -> Result<ResolvedClosure, ClosureError> {
-    read_closure_for_world(project_root, lockfile, None)
+    read_closure_for_world(project_root, lockfile, None, None)
 }
 
 /// [`read_closure`], told which world the component targets (LIB012).
@@ -217,6 +226,7 @@ pub fn read_closure_for_world(
     project_root: &Path,
     lockfile: &Lockfile,
     target_world: Option<&str>,
+    host_contract: Option<(&str, &str)>,
 ) -> Result<ResolvedClosure, ClosureError> {
     let order = walk_order(lockfile)?;
 
@@ -259,6 +269,27 @@ pub fn read_closure_for_world(
                                 interface: interface.name.clone(),
                                 worlds: interface.worlds.clone(),
                                 target: world.to_string(),
+                            }
+                            .into());
+                        }
+                    }
+
+                    // The callback half of the same contract. LIB012 above
+                    // asks whether the library binds to this world at all;
+                    // this asks whether the host can deliver the callbacks it
+                    // requests. Nothing downstream catches it — the guest
+                    // imports nothing wrong, so the compiler is satisfied and
+                    // the symptom is a callback that never arrives on a user's
+                    // device.
+                    if let (Some(world), Some((host, wit))) = (target_world, host_contract) {
+                        if let Some(missing) =
+                            crate::callback::check(&interface, wit, world)
+                        {
+                            return Err(HostBridgeError::NoCallbackPath {
+                                library: package.name.clone(),
+                                host: host.to_string(),
+                                world: missing.world,
+                                functions: missing.functions,
                             }
                             .into());
                         }

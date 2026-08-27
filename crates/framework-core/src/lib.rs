@@ -21,6 +21,7 @@
 //! ```
 
 pub mod build;
+pub mod callback;
 pub mod cache;
 pub mod closure;
 pub mod discover;

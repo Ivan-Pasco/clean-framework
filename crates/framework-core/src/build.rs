@@ -203,7 +203,7 @@ pub fn assemble_request_with(
     // Steps 3 and 4 — resolve the closure and read each package's manifest.
     // The world comes from Moment 1 above, so a library's `requires host
     // worlds` can be checked against it (LIB012) while the closure is read.
-    let closure = resolve_closure(inputs, &manifest)?;
+    let closure = resolve_closure(inputs, &manifest, &contract)?;
 
     // Step 1 — discover, with the roots and extensions the closure's plugins
     // declare (FRM-BO-03 item 3, §11.4). This runs after step 3 because a
@@ -238,12 +238,16 @@ pub fn assemble_request_with(
 fn resolve_closure(
     inputs: &BuildInputs,
     manifest: &Manifest,
+    contract: &HostContract,
 ) -> Result<ResolvedClosure, FrameworkError> {
     // `None` only when the manifest names a target with no world mapping,
     // which `Manifest::validate` has already refused — so in practice this is
     // always the real world, and LIB012 is always checked.
     let world = manifest.world();
-    let existing = closure::resolve_for_world(&inputs.project_root, world)?;
+    // Both library-side checks need the contract: LIB012 needs the world name,
+    // the callback check needs the WIT it was fetched from.
+    let host = Some((contract.host.as_str(), contract.wit.as_str()));
+    let existing = closure::resolve_for_world(&inputs.project_root, world, host)?;
 
     // Declares nothing: whatever the lockfile holds, there is nothing to ask
     // Manager for.
@@ -270,7 +274,7 @@ fn resolve_closure(
     // declared dependencies. An empty closure here means it did not — refusing
     // names the real problem, where carrying on would surface it as a pile of
     // unresolved imports with no mention of resolution at all.
-    match closure::resolve_for_world(&inputs.project_root, world)? {
+    match closure::resolve_for_world(&inputs.project_root, world, host)? {
         Some(closure) if !closure.dependencies.is_empty() => Ok(closure),
         _ => Err(closure::ClosureError::NotResolved {
             project_root: inputs.project_root.clone(),
