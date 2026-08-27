@@ -39,6 +39,7 @@ clean-framework/
 │   │       ├── build.rs                # orchestrates FRM-BO §11.2 steps 1–10 (build orchestration)
 │   │       ├── discover.rs             # §11.3 file discovery (roots, extensions, excludes, order, encoding)
 │   │       ├── manifest.rs             # clean.toml load + validate (schema/clean.toml.md)
+│   │       ├── world.rs                # the worlds and every fact keyed to one (Platform 07 §7.2)
 │   │       ├── lower.rs                # §11.4 clean.toml → request-document lowering
 │   │       ├── request.rs              # RequestDocument type (mirrors Platform 14 §14.1.1)
 │   │       ├── overrides.rs            # FRM-BO-08 override audit trail
@@ -230,6 +231,12 @@ At the end of this phase: `cln build hello-world` produces `dist/app.wasm` and `
 Three decisions worth recording. **The framework parses this Clean, and only this Clean.** The WIT is an *input* to the compilation, so it must exist before the compiler runs — letting the compiler derive it would invert the seam that FRM-BO-02 and CMP-01 define. What keeps the second parser honest is how little it reads: one file shape, no expressions, no bodies, because LIB019 makes `host_bridge.cln` declarations-only. **A library that ships both a `host_bridge.cln` and an `[exports].wit` is refused** rather than having one silently win, because the two can disagree and either preference would hide it. **The synthesized WIT is part of build identity** — it lands in the request document, so editing a declaration changes the cache key, which is what stops a rebuilt bridge being served a component compiled against the old contract.
 
 *Blocked downstream, not by us:* compiler 0.1.0 makes `library_manifests[].compiletime_wasm_sha256` mandatory, so a library with no compile-time handler — every host-bridge-only library, `frame.storage` included — cannot be built yet. Platform 14 §14.1.1 marks the field optional and the framework emits it that way. Written up in [system-documents/host-bridge-findings-for-compiler.md](system-documents/host-bridge-findings-for-compiler.md), pinned by a red Layer C test.
+
+**Phase 2b — One world registry.** *Landed.* `crates/framework-core/src/world.rs` owns the worlds and every fact keyed to one; `manifest`, `hostbridge`, `hosttoml` and `package` read from it instead of each carrying their own copy.
+
+The four copies had drifted apart in the way that matters — quietly. `hosttoml`'s map ended in `_ => "cli-default"`, so a world it did not name produced a `host.toml` that parsed cleanly and then ran as a CLI guest, surfacing only as a CLIH-06 warning on the host's stderr rather than as a failed build. And `hostbridge`'s vocabulary was a fixed-size `[&str; 4]`, which made adding a world a *type* change; until that change was made, a library naming the new world failed to **parse**, and the diagnostic blamed the library author for a gap in this crate.
+
+`World` has no optional fields, so a half-declared world does not compile, and the completeness test covers what the type cannot: every target resolves back to the world claiming it, no target is claimed twice, and `cli` is the only world permitted to name `cli-default` — any other would be the old fallthrough rather than the deliberate CLIH-20 remap. Verified by injecting a fifth world and running the suite: the entry alone sufficed, every other test passed untouched, and the only failure was `manifest`'s spec-drift tripwire correctly demanding a §7.2 amendment. **That tripwire is deliberately unchanged** — adding a target is still a spec change, not a config change.
 
 **Phase 3 — Block-handler compilation (step 5).** For every library with a `handles block` declaration, compile the handler source to WASM (via the compiler seam), cache under `~/.cln/wit-cache/` keyed by SHA-256 (ADR-0004). Pass the cached WASM's hash into the request document as `library_manifests[].compiletime_wasm_sha256`. The compiler executes the handler in its sandbox during pass 6.
 
