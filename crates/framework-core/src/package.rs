@@ -62,8 +62,12 @@ pub fn package(
     // server bundle, anything else ships an application. Manager §00.14 leaves
     // the multi-world case to a future `--kind` override; a single-target
     // project has exactly one answer.
+    //
+    // The answer is the world's own, from `crate::world`, rather than a
+    // `world == "server"` compare here — a new world gets a kind by declaring
+    // one, not by matching a string this function happens to know.
     let world = manifest.world().unwrap_or("cli");
-    let kind = if world == "server" { Kind::Serve } else { Kind::Clapp };
+    let kind = crate::world::for_name(world).map(|w| w.package_kind).unwrap_or(Kind::Clapp);
 
     let mut components = BTreeMap::new();
     components.insert(world.to_string(), wasm);

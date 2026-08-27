@@ -135,28 +135,24 @@ pub struct TargetSection {
 /// failure rather than a missed case.
 ///
 /// Resolving it needs a CONF-02 amendment (remap `wasm32-cli`, or add a
-/// `wasm32-cli-default` target); either is a one-line change here once §7.2
-/// says so. See `system-documents/host-world-findings-for-clean-cli.md`.
+/// `wasm32-cli-default` target); either is a one-line change once §7.2 says so.
+/// See `system-documents/host-world-findings-for-clean-cli.md`.
+///
+/// The table itself lives in [`crate::world`], which owns every fact a world
+/// carries so the four sites that need one cannot drift apart.
 pub fn world_for_target(target: &str) -> Option<&'static str> {
-    match target {
-        "wasm32-server" | "wasm64-server" => Some("server"),
-        "wasm32-browser" => Some("browser"),
-        "wasm32-cli" => Some("cli"),
-        "wasm32-embedded" => Some("embedded"),
-        _ => None,
-    }
+    crate::world::for_target(target).map(|w| w.name)
 }
 
 /// The built-in targets (Platform 07 §7.4, CONF-02). Third-party targets are
 /// declared through Manager, which M0 does not consult — an unknown target is
 /// `CFG001` here.
-pub const BUILT_IN_TARGETS: &[&str] = &[
-    "wasm32-server",
-    "wasm32-browser",
-    "wasm32-cli",
-    "wasm32-embedded",
-    "wasm64-server",
-];
+///
+/// Derived from [`crate::world::WORLDS`]: a target exists because some world
+/// claims it, and there is no second list to keep in step.
+pub fn built_in_targets() -> Vec<&'static str> {
+    crate::world::built_in_targets()
+}
 
 /// The schema default for `build.entry`.
 pub const DEFAULT_ENTRY: &str = "app/main.cln";
@@ -198,7 +194,7 @@ impl Manifest {
             path: path.to_path_buf(),
         })?;
 
-        if !BUILT_IN_TARGETS.contains(&target) {
+        if !built_in_targets().contains(&target) {
             return Err(ManifestError::UnknownTarget {
                 path: path.to_path_buf(),
                 target: target.to_string(),
@@ -459,7 +455,7 @@ version = "0.1.0"
 
         // Exactly these, no more: an extra entry is a target invented here
         // rather than in the spec.
-        assert_eq!(BUILT_IN_TARGETS.len(), 5, "the spec lists five built-in targets");
+        assert_eq!(built_in_targets().len(), 5, "the spec lists five built-in targets");
     }
 
     #[test]
@@ -481,7 +477,7 @@ version = "0.1.0"
             "if §7.2 has been amended, update this test and the mapping together"
         );
         assert!(
-            !BUILT_IN_TARGETS.contains(&"wasm32-cli-default"),
+            !built_in_targets().contains(&"wasm32-cli-default"),
             "a wasm32-cli-default target needs §7.2 to declare it first"
         );
     }
@@ -490,7 +486,7 @@ version = "0.1.0"
     fn every_built_in_target_maps_to_a_world() {
         // If this fails, a target reaches the request document with an empty
         // world and the compiler checks against nothing.
-        for target in BUILT_IN_TARGETS {
+        for target in built_in_targets() {
             assert!(
                 world_for_target(target).is_some(),
                 "no world mapped for built-in target {target}"

@@ -36,6 +36,7 @@ pub mod manifest;
 pub mod package;
 pub mod plugin;
 pub mod resolver;
+pub mod world;
 
 pub use build::{
     assemble_request, build, check, BuildInputs, BuildOutcome, Caching, CheckOutcome, APP_WASM,

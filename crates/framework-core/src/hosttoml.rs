@@ -147,17 +147,24 @@ pub fn generate(manifest: &Manifest, placement: Placement) -> String {
 /// bounded and visible: `[guest] world` is metadata, and clean-cli decides the
 /// real mode from the guest's exports, warning on stderr if this key disagrees
 /// (CLIH-06). So a wrong value here is a warning, never a wrong execution.
+///
+/// The value comes from [`crate::world::World::guest_world`]. This used to be a
+/// `match` ending in `_ => "cli-default"`, and that arm was the bug: a world the
+/// arm did not name produced a `host.toml` that parsed cleanly and then ran as a
+/// CLI guest, reported only as a CLIH-06 warning on the host's stderr. There is
+/// no fallthrough now — an unknown world means [`WORLDS`] is missing an entry,
+/// which is an invariant break in this crate, not a default to paper over.
+///
+/// [`WORLDS`]: crate::world::WORLDS
 fn guest_world(manifest: &Manifest) -> &'static str {
-    match manifest.world() {
-        Some("cli") => "cli-default",
-        Some(other) => match other {
-            "server" => "server",
-            "browser" => "browser",
-            "embedded" => "embedded",
-            _ => "cli-default",
-        },
-        None => "cli-default",
-    }
+    manifest
+        .world()
+        .and_then(crate::world::for_name)
+        .map(|w| w.guest_world)
+        // Reachable only through `toml::from_str` in tests, which skips the
+        // validation that requires `[build] target`. `Manifest::load` rejects a
+        // manifest with no world long before this.
+        .unwrap_or("cli-default")
 }
 
 #[cfg(test)]

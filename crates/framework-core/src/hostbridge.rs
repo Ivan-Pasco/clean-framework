@@ -48,7 +48,14 @@ pub const HOST_BRIDGE_FILE: &str = "host_bridge.cln";
 /// Closed on purpose. A typo like `"servers"` would otherwise produce a
 /// library that binds to no world at all and fails later as "unbound", which
 /// reads as a host problem rather than a spelling one.
-pub const KNOWN_WORLDS: [&str; 4] = ["server", "browser", "cli", "embedded"];
+///
+/// Derived from [`crate::world::WORLDS`] rather than listed again here. It was
+/// a fixed-size `[&str; 4]`, which made adding a world a *type* change — and
+/// until that change was made, a library naming the new world failed to
+/// **parse**, blaming the library author for a gap in this crate.
+pub fn known_worlds() -> Vec<&'static str> {
+    crate::world::names()
+}
 
 /// One `host interface` block: the whole content of a `host_bridge.cln`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,7 +64,7 @@ pub struct HostInterface {
     pub name: String,
     /// The interface's own version, independent of the library's (Platform 08).
     pub version: String,
-    /// Non-empty; validated against [`KNOWN_WORLDS`].
+    /// Non-empty; validated against [`known_worlds`].
     pub worlds: Vec<String>,
     pub functions: Vec<HostFunction>,
 }
@@ -578,10 +585,10 @@ fn parse_worlds(rest: &str) -> Result<Vec<String>, String> {
             continue;
         }
         let world = parse_quoted(part)?;
-        if !KNOWN_WORLDS.contains(&world.as_str()) {
+        if !crate::world::is_known(&world) {
             return Err(format!(
                 "`{world}` is not a host world; expected one of {}",
-                KNOWN_WORLDS.join(", ")
+                known_worlds().join(", ")
             ));
         }
         if worlds.contains(&world) {

@@ -325,11 +325,11 @@ impl ManifestError {
             }
             ManifestError::MissingTarget { .. } => Some(format!(
                 "add `target = \"wasm32-server\"` under [build]; valid targets are {}",
-                crate::manifest::BUILT_IN_TARGETS.join(", ")
+                crate::manifest::built_in_targets().join(", ")
             )),
             ManifestError::UnknownTarget { .. } => Some(format!(
                 "valid targets are {}",
-                crate::manifest::BUILT_IN_TARGETS.join(", ")
+                crate::manifest::built_in_targets().join(", ")
             )),
             ManifestError::MalformedProjectVersion { .. } => {
                 Some("use a semver version such as \"0.1.0\"".into())
@@ -400,7 +400,7 @@ impl HostWitError {
             ),
             HostWitError::NoWorldForTarget { target, .. } => Some(format!(
                 "'{target}' maps to no component-model world; use one of {}",
-                crate::manifest::BUILT_IN_TARGETS.join(", ")
+                crate::manifest::built_in_targets().join(", ")
             )),
             HostWitError::UnknownHost { known, .. } => Some(format!(
                 "set [target].wit_source to the host's host.wit URL, or use a known host: {}",
