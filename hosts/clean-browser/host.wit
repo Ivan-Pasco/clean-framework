@@ -1,0 +1,46 @@
+// clean-browser — the host contract.
+//
+// HCV-02 (Platform 16 §16.5): this file is the authoritative declaration of
+// what this host provides. There is no parallel manifest. The framework
+// fetches it for its Moment 1 check, `cln check` uses it at Moment 2, and the
+// browser host compares a guest's embedded WIT against it at Moment 3 before
+// instantiating.
+//
+// HCV-06 (§16.14): CI verifies that every interface declared here is really
+// registered by this host, and that nothing registered is undeclared. A no-op
+// or throwing stub under a declared name is a hard failure — the correct
+// response to an unimplemented interface is to omit it from this file.
+//
+// SCOPE: nothing. `world browser` is deliberately EMPTY.
+//
+// This is not a placeholder awaiting content; it is the correct contract for
+// the browser host as it exists today. No browser host has shipped, so under
+// HCV-06 there is no interface this file may declare. An empty world is the
+// one honest thing it can say.
+//
+// The file exists anyway because absence and emptiness are different failures.
+// `OFFICIAL_HOSTS` maps clean-browser to this path, so while the file was
+// missing every browser build failed at fetch — a network-shaped error for
+// what is really a "this host provides nothing yet" condition. With the file
+// present, a guest that imports nothing builds and runs; a guest that imports
+// something fails at Moment 1 naming the interface it wanted. That is the
+// diagnostic the developer needs.
+//
+// It also unblocks composition. `clean-mobile-surface` includes this world to
+// inherit the browser surface rather than forking it (see that host's file,
+// §2). Including an empty world composes exactly as well as including a full
+// one, and every interface added here later is inherited by mobile for free —
+// which is the whole reason mobile was written to include rather than restate.
+//
+// `wasi:*` is provided to every composed component by clean-host-core (CH-03)
+// and is not restated here — host.wit declares the `clean:*` surface this host
+// owns.
+
+package clean:host@0.1.0;
+
+/// The browser world.
+///
+/// Empty by HCV-06, not by omission. Adding the first interface here means a
+/// browser host genuinely registers it.
+world browser {
+}

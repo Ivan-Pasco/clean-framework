@@ -452,10 +452,11 @@ version = "0.1.0"
         assert_eq!(world_for_target("wasm32-browser"), Some("browser"));
         assert_eq!(world_for_target("wasm32-cli"), Some("cli"));
         assert_eq!(world_for_target("wasm32-embedded"), Some("embedded"));
+        assert_eq!(world_for_target("wasm32-mobile"), Some("mobile"));
 
         // Exactly these, no more: an extra entry is a target invented here
         // rather than in the spec.
-        assert_eq!(built_in_targets().len(), 5, "the spec lists five built-in targets");
+        assert_eq!(built_in_targets().len(), 6, "the spec lists six built-in targets");
     }
 
     #[test]

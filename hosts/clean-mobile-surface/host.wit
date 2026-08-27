@@ -1,0 +1,345 @@
+// clean-mobile-surface — the host contract.
+//
+// HCV-02 (Platform 16 §16.5): this file is the authoritative declaration of
+// what this host provides. There is no parallel manifest. The framework
+// fetches it for its Moment 1 check, `cln check` uses it at Moment 2, and the
+// host compares a guest's embedded WIT against it at Moment 3 before
+// instantiating.
+//
+// HCV-06 (§16.14): CI verifies that every interface declared here is really
+// registered by this host's shell, and that nothing registered is undeclared.
+// A no-op or throwing stub under a declared name is a hard failure — the
+// correct response to an unimplemented interface is to omit it from this file.
+//
+// SCOPE: the device surface, and only the parts of it backed by an official
+// Tauri v2 plugin. Bluetooth, remote push, filesystem, NFC, haptics, clipboard
+// and share are omitted — the reasoning for each is in
+// `system-documents/mobile-world-draft.md` §6. Omission here is not a promise
+// to add them; it is HCV-06 applied.
+//
+// `wasi:*` comes from clean-host-core (CH-03) and is not restated — host.wit
+// declares the `clean:*` surface this host owns.
+//
+// ---
+//
+// WHAT THIS HOST IS
+//
+// clean-mobile-surface runs a Clean guest as wasm in the WebView's engine,
+// inside a Tauri Rust shell on iOS and Android. The name says where the guest
+// lives: on the surface, in the page. A future peer host could run the guest
+// in an embedded wasmtime instead. Both would target `wasm32-mobile` and
+// implement this same `mobile` world, so switching seats is a `clean.toml`
+// edit rather than a rewrite.
+//
+// Two rules keep that true, and every signature below obeys them:
+//
+// 1. COMPOSITION. This host provides the browser contract PLUS a device
+//    package. It does not fork the browser surface. A guest touching no
+//    device API is portable between browser and mobile unchanged; one that
+//    opens the camera declares that import explicitly, and the declaration is
+//    what makes it non-portable — visibly, in its own source, rather than by
+//    surprise at load time.
+//
+//    COMPOSITION IS BY DUPLICATION, NOT BY `include`. The constraint is the
+//    TRANSPORT, not WIT. `hostwit::resolve_contract` fetches exactly one URL
+//    and yields one string, whose SHA-256 is pinned in `.cln/lock.toml`
+//    (BVER-03); the framework then checks it textually for `world mobile`
+//    (`declares_world` — "a courier, not a WIT compiler") and hands those
+//    bytes to the compiler as `target_world.wit`. One file arrives, so
+//    whatever this world needs must be inside it.
+//
+//    WIT itself would permit `include`: two files sharing
+//    `package clean:host@0.1.0` resolve together and a world in one may
+//    include a world in the other. That is not available here only because
+//    clean-browser's file is never fetched alongside this one. And inlining
+//    `world browser` into this file to make `include` legal would inherit its
+//    `export` lines while still copying every interface body — the appearance
+//    of reuse without the substance.
+//
+//    Today the duplication costs nothing: `world browser` is empty, so there
+//    is nothing to copy and this file is complete as written. The cost
+//    arrives with clean-browser's first real interface. The guard is
+//    `tests/mobile_contract.rs`, which fails when browser declares an
+//    interface this world does not carry — drift becomes a failing build
+//    rather than a silent divergence. Real reuse would need a multi-file
+//    contract transport, which is a framework-wide change to fetching,
+//    hashing and pinning, and wants its own spec amendment.
+//
+// 2. VOCABULARY. Device interfaces are phrased in DEVICE terms, never browser
+//    terms. `capture-photo`, not `get-user-media`. `position`, not
+//    `GeolocationPosition`. A permission is a host concept, not a
+//    `navigator.permissions` query. Any DOM handle, JS value, or
+//    browser-lifecycle concept leaking into these signatures is precisely what
+//    a native host could not honour, and closes the door this naming scheme
+//    exists to hold open.
+//
+// ---
+//
+// ASYNCHRONY
+//
+// Device APIs are unavoidably async — the camera takes as long as the user
+// takes. The shipped Clean contracts do not use `future<>` or `stream<>`:
+// clean-server pairs a handle with a guest-supplied id and calls back. This
+// file follows that idiom rather than introducing a second one:
+//
+//   - the guest calls a `request-*` function, supplying a `request-id: u32`
+//     it chose
+//   - the host returns `result<_, error>` immediately — did the REQUEST start,
+//     not did the operation succeed
+//   - on completion the host invokes the matching callback with that id
+//
+// The guest owns request-id allocation and must not reuse an id while its
+// callback is outstanding; the host does not track liveness and would deliver
+// a late result to whoever now holds the id.
+//
+// If WIT-native `future<>` is later adopted across all Clean hosts these
+// convert mechanically. Adopting it here first would make mobile the odd host
+// out.
+//
+// A NOTE ON WHO DECLARES WHAT. The callbacks in `world mobile` can only live
+// in this hand-written file. `HostInterface::to_wit` emits exactly one bare
+// interface of guest→host funcs — no world, no import — so a `frame.device`
+// library's `host_bridge.cln` can declare only the outbound half. The two
+// halves of one device API therefore have two owners and nothing yet checks
+// they agree (mobile-world-draft.md §7, open question 2a).
+
+package clean:host@0.1.0;
+
+/// Permission state for a device capability.
+///
+/// Declared once and shared: every device interface needs it, and three
+/// slightly different spellings of "denied" would be worse than one.
+interface permissions {
+    /// Where a capability stands with the user.
+    enum state {
+        /// Never asked. The guest may prompt.
+        undetermined,
+        /// The user allowed it.
+        granted,
+        /// The user refused. Asking again is usually a bad experience, and on
+        /// iOS is frequently a no-op — the platform will not re-prompt.
+        denied,
+        /// Policy forbids it (parental controls, MDM). Not the user's choice
+        /// and not recoverable by asking.
+        restricted,
+    }
+
+    /// A capability a permission can be held for.
+    ///
+    /// One enum rather than per-interface enums, so a guest can write a single
+    /// permission-handling path. Values are added only alongside the interface
+    /// that needs them.
+    enum capability {
+        camera,
+        location,
+        notifications,
+        biometrics,
+    }
+
+    /// Current state. Never prompts — safe to call while rendering.
+    query: func(what: capability) -> state;
+
+    /// Ask the user. Returns whether the PROMPT was raised, not the answer;
+    /// the answer arrives at `permission-result`.
+    ///
+    /// Fails when the platform will not prompt at all — already `denied` on
+    /// iOS, or `restricted` anywhere. That distinction matters: a guest that
+    /// cannot tell "the user said no" from "the OS refused to ask" will loop
+    /// asking forever.
+    request: func(what: capability, request-id: u32) -> result<_, string>;
+}
+
+/// Still-image capture (Tauri `camera` plugin).
+///
+/// Video and live preview streams are not declared: the plugin's supported
+/// surface is capture, and a preview stream belongs to the browser surface
+/// this host includes rather than to the device package.
+interface camera {
+    /// Which physical camera to prefer. A hint, not a guarantee — a device
+    /// with no front camera honours `front` with the one it has.
+    enum facing {
+        front,
+        rear,
+    }
+
+    /// How the capture is delivered.
+    record options {
+        facing: facing,
+        /// JPEG quality, 1..=100. Values outside the range are clamped by the
+        /// host rather than rejected: a bad quality number is never a good
+        /// reason to fail a capture the user already posed for.
+        quality: u8,
+    }
+
+    /// Open the capture UI. Returns when the UI has been RAISED; the image
+    /// arrives at `photo-captured`.
+    ///
+    /// A user who cancels produces neither an error here nor a callback with
+    /// data — see `photo-captured`'s docs for how cancellation is reported.
+    request-photo: func(opts: options, request-id: u32) -> result<_, string>;
+}
+
+/// Device position (Tauri `geolocation` plugin).
+interface location {
+    /// A position fix. Fields are in SI units and WGS-84, matching what both
+    /// platforms report natively.
+    record position {
+        /// Degrees, positive north.
+        latitude: f64,
+        /// Degrees, positive east.
+        longitude: f64,
+        /// Metres above the WGS-84 ellipsoid. None when the fix is 2-D, which
+        /// is common indoors — an altitude of 0 would be a lie.
+        altitude: option<f64>,
+        /// Horizontal 68% confidence radius, metres.
+        accuracy: f64,
+        /// Milliseconds since the Unix epoch, from the device clock.
+        timestamp: u64,
+    }
+
+    /// How hard to work for the fix.
+    enum accuracy-mode {
+        /// Cell/wifi. Fast, cheap, hundreds of metres.
+        coarse,
+        /// GNSS. Slower, costs battery, metres.
+        fine,
+    }
+
+    /// Ask for one fix. Delivered at `position-fixed`.
+    request-position: func(mode: accuracy-mode, request-id: u32) -> result<_, string>;
+}
+
+/// Local notifications (Tauri `notification` plugin).
+///
+/// LOCAL ONLY, and the boundary is deliberate. Remote push needs a server
+/// credential, a device token registered with APNs/FCM, and a delivery
+/// guarantee this host does not make. It is a different trust boundary and
+/// belongs in a different contract, not in an extra field here.
+interface notifications {
+    /// What the user sees.
+    record content {
+        title: string,
+        body: string,
+        /// Guest-chosen tag. A later notification with the same tag replaces
+        /// the earlier one rather than stacking — the standard way to keep a
+        /// progress or status notification to one row.
+        tag: option<string>,
+    }
+
+    /// Show it now. Returns once the notification is handed to the OS; there
+    /// is no callback, because display is not an event the guest can act on.
+    show: func(c: content) -> result<_, string>;
+
+    /// Withdraw a previously shown notification by tag. Withdrawing a tag that
+    /// is not displayed succeeds — the postcondition the guest wants is "not
+    /// on screen", which is already true.
+    cancel: func(tag: string) -> result<_, string>;
+}
+
+/// Local user verification (Tauri `biometric` plugin).
+///
+/// Verification only. This interface never exposes biometric data, and never
+/// will: the platform APIs do not surface it, and a contract that implied
+/// otherwise would be inviting a guest to ask for something no host can give.
+interface biometrics {
+    /// What the device can do, as far as the guest needs to care.
+    ///
+    /// Deliberately not an enumeration of Face ID / Touch ID / fingerprint /
+    /// iris — that is vendor vocabulary, and a guest branching on it would be
+    /// making a decision the host already made better.
+    enum availability {
+        /// Enrolled and usable now.
+        available,
+        /// Hardware exists, nothing enrolled. Recoverable by the user in
+        /// Settings, so worth telling them.
+        not-enrolled,
+        /// No hardware, or policy forbids it. Not recoverable — fall back.
+        unavailable,
+    }
+
+    /// Can we verify right now?
+    status: func() -> availability;
+
+    /// Prompt for verification. The result arrives at `biometric-result`.
+    ///
+    /// `reason` is shown to the user by the OS and is mandatory on iOS. It is
+    /// required here for both platforms so a guest cannot ship an Android
+    /// build that works and an iOS build that throws at runtime.
+    request-verify: func(reason: string, request-id: u32) -> result<_, string>;
+}
+
+/// Application lifecycle.
+///
+/// A mobile app is suspended and resumed constantly, and a guest that assumes
+/// otherwise loses data. Transitions are pushed to `app-state-changed` rather
+/// than polled; `current` exists for the one-shot question at startup.
+interface lifecycle {
+    /// Where the app stands with the OS.
+    enum app-state {
+        /// Visible and receiving input.
+        active,
+        /// Visible but not focused — control centre pulled down, split screen
+        /// without focus. Animations should pause; state need not be flushed.
+        inactive,
+        /// Not visible. Execution may be suspended at any moment, and the
+        /// process may be killed without further notice.
+        background,
+    }
+
+    /// The state right now.
+    current: func() -> app-state;
+}
+
+/// The mobile world: the browser surface, plus devices.
+///
+/// The browser half is EMPTY here, and correctly so — `world browser` in
+/// clean-browser is itself empty under HCV-06, so mirroring it faithfully
+/// means writing nothing. When clean-browser declares its first interface, it
+/// is copied in here, and `tests/mobile_contract.rs` fails until it is. See
+/// the composition note in the banner for why this is duplication rather than
+/// `include`.
+world mobile {
+
+    // The callbacks below name types owned by the interfaces above. WIT has
+    // no dotted type paths in a world, so the names are bound with `use`.
+    // This is a reference, not a second declaration: `position` here IS
+    // `location`'s, which is what keeps HCV-03 true by construction rather
+    // than by review.
+    //
+    // Note the resolved world shows `import location` / `import lifecycle`
+    // that this file never wrote. `use` pulls in the defining interface, and
+    // in a world that arrives as an import — so those two interfaces appear
+    // in BOTH directions. Harmless (a type-only import alongside the real
+    // export), but it is the kind of thing that reads as a mistake later, so:
+    // it is `use` doing it, not a stray line.
+    use location.{position};
+    use lifecycle.{app-state};
+
+    export permissions;
+    export camera;
+    export location;
+    export notifications;
+    export biometrics;
+    export lifecycle;
+
+    /// The user's answer to `permissions.request`.
+    import permission-result: func(request-id: u32, granted: bool);
+
+    /// A captured image, JPEG-encoded.
+    ///
+    /// An empty list means the user cancelled. Cancellation is not an error —
+    /// it is the second normal outcome of asking someone to take a photo — and
+    /// giving it its own callback would double the surface for no gain.
+    import photo-captured: func(request-id: u32, image: list<u8>);
+
+    /// A position fix. Absent when the fix could not be obtained before the
+    /// host gave up.
+    import position-fixed: func(request-id: u32, pos: option<position>);
+
+    /// The outcome of `biometrics.request-verify`.
+    import biometric-result: func(request-id: u32, verified: bool);
+
+    /// Fired on every transition, not polled. A guest that must flush state
+    /// before suspension cannot afford to find out by asking afterwards.
+    import app-state-changed: func(to: app-state);
+}

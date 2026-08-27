@@ -98,6 +98,15 @@ pub const WORLDS: &[World] = &[
         guest_world: "embedded",
         package_kind: Kind::Clapp,
     },
+    World {
+        name: "mobile",
+        targets: &["wasm32-mobile"],
+        guest_world: "mobile",
+        // A mobile app is an end-user application, not a deployment bundle:
+        // it ships through an app store, and `Kind::Serve` exists for the
+        // one world that emits migrations and host configuration.
+        package_kind: Kind::Clapp,
+    },
 ];
 
 /// The world a `build.target` selects, or `None` for an unknown target.

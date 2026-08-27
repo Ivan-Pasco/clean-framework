@@ -1,12 +1,41 @@
 # The `mobile` world — a first draft of `clean-mobile-surface`
 
-**Status: design draft, not a contract.** Nothing here is implemented, and per HCV-06 an
-interface must not appear in a real `host.wit` until the host genuinely registers it —
-a stub under a declared name is a hard failure. This document exists to fix the *shape*
-of the contract while the decisions are cheap, and to record why each shape was chosen.
+**Status: SUPERSEDED as a draft, retained as the reasoning record.** The contract now
+exists at [`hosts/clean-mobile-surface/host.wit`](../hosts/clean-mobile-surface/host.wit).
+Read that file for what the contract *is*; read this one for why each shape was chosen
+and what was rejected. Where the two disagree, the `.wit` wins.
 
-Date: 2026-08-26. Blocked on `clean-browser`, which has no contract yet (`OFFICIAL_HOSTS`
-points at `hosts/clean-browser/host.wit` in this repo; that directory does not exist).
+Date: 2026-08-26. Shipped 2026-08-27, with three changes forced by contact with the code:
+
+1. **`include` was abandoned — because of the transport, not because of WIT.** §2's
+   composition rule survives; its mechanism does not. `hostwit::resolve_contract` fetches
+   exactly one URL per host and yields one string, pinned by SHA-256 in `.cln/lock.toml`
+   (BVER-03); `declares_world` then checks it *textually* ("a courier, not a WIT
+   compiler"). Only mobile's own file ever reaches the compiler, so an `include` of
+   clean-browser resolves nothing.
+
+   WIT itself would allow it, and an earlier reading of this that blamed the shared
+   `package clean:host@0.1.0` name was **wrong**: two files sharing a package name
+   resolve together fine, and a world in one may include a world in the other. (The
+   symptom that suggested otherwise was the `//` banner parsing as a doc comment on
+   `package`.) Inlining `world browser` into mobile's file would make `include` legal,
+   but inherits only the `export` lines while still copying every interface body — the
+   appearance of reuse without the substance.
+
+   So composition is by duplication, guarded by a drift test rather than a resolver.
+   Costs nothing today: `world browser` is empty. Genuine reuse would need a multi-file
+   contract transport — a framework-wide change to fetching, hashing and pinning, wanting
+   its own spec amendment.
+2. **The blocker dissolved rather than being waited out.** `clean-browser` now ships an
+   empty `world browser { }` at [`hosts/clean-browser/host.wit`](../hosts/clean-browser/host.wit),
+   which open question 2 had already identified as correct under HCV-06.
+3. **`option<position>` replaced the bare `position`** in `position-fixed`, so a fix that
+   never arrives is expressible without inventing a sentinel coordinate.
+
+The three framework edits the memory predicted are done: `wasm32-mobile` in the `WORLDS`
+table, its `mobile` mapping, and `clean-mobile-surface` in `OFFICIAL_HOSTS`. Platform 07
+§7.2 was amended first, as CONF-02 requires — the arity assertion in `manifest.rs` is what
+made that non-optional.
 
 ---
 
@@ -312,7 +341,8 @@ argue with.
    where-does-the-guest-live axis, but it is not committed. Worth settling before the
    first host ships, not after.
 
-2. **Whether `include` is the right composition mechanism.** WIT `include` pulls a world
+2. **~~Whether `include` is the right composition mechanism.~~ RESOLVED: no — one file
+   per contract, so duplication plus a drift test. See the status note above.** WIT `include` pulls a world
    into another. Whether that or explicit re-export better expresses "browser plus
    devices" depends on how `clean-browser` declares itself. Decided since: that contract
    ships as an **empty `world browser { }`**, because HCV-06 forbids declaring what no

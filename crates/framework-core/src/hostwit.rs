@@ -60,6 +60,17 @@ const OFFICIAL_HOSTS: &[(&str, &str)] = &[
         "clean-cli",
         "https://raw.githubusercontent.com/Ivan-Pasco/clean-manager/v{version}/hosts/clean-cli/host.wit",
     ),
+    // Named for where the guest lives — on the surface, in the WebView's
+    // engine — rather than for the shell that hosts it. A peer host running
+    // the guest in an embedded wasmtime would implement the same `mobile`
+    // world under its own name, making the seat a `clean.toml` edit. The name
+    // was settled before shipping because `.cln/lock.toml` pins contract
+    // hashes, so renaming a host later is a migration for every project
+    // pinning it.
+    (
+        "clean-mobile-surface",
+        "https://raw.githubusercontent.com/Ivan-Pasco/clean-framework/v{version}/hosts/clean-mobile-surface/host.wit",
+    ),
 ];
 
 /// A host contract, obtained and verified. This is what becomes `target_world`.
